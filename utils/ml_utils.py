@@ -1,13 +1,14 @@
+import os
 import numpy as np
 import pandas as pd
 import joblib
 import json
 
-rain_model = joblib.load(r"C:\weather-ai-project\models\rain_classifier.pkl")
-temp_model = joblib.load(r"C:\weather-ai-project\models\temp_regressor.pkl")
-scaler     = joblib.load(r"C:\weather-ai-project\models\scaler.pkl")
+rain_model = joblib.load(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "models", "rain_classifier.pkl"))
+temp_model = joblib.load(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "models", "temp_regressor.pkl"))
+scaler     = joblib.load(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "models", "scaler.pkl"))
 
-with open(r"C:\weather-ai-project\models\reg_columns.json", "r") as f:
+with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "models", "reg_columns.json"), "r") as f:
     reg_columns = json.load(f)
 
 SCALE_COLS = ["MinTemp", "MaxTemp", "Rainfall", "Evaporation", "Sunshine",
