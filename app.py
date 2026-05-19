@@ -1,0 +1,1738 @@
+
+# ================================================================
+# app.py — WeatherAI Climate Intelligence System — FULL VERSION
+# Student : J. Charan Reddy | Reg: 23BCB7120
+# ================================================================
+
+import streamlit as st
+import requests
+import numpy as np
+import pandas as pd
+import sys
+import plotly.graph_objects as go
+from datetime import datetime
+
+sys.path.append(r"C:\weather-ai-project")
+from utils.ml_utils import get_ml_prediction, get_recommendations, get_alert_level
+
+# ── PAGE CONFIG ──────────────────────────────────────────────────
+st.set_page_config(
+    page_title="WeatherAI - Climate Intelligence",
+    page_icon="🌦️",
+    layout="wide",
+    initial_sidebar_state="collapsed"
+)
+
+# ── SESSION STATE ────────────────────────────────────────────────
+defaults = {
+    "page":               "Home",
+    "prediction_history": [],
+    "alert_history":      [],
+    "prefill":            {},
+    "city1_data":         None,
+    "city2_data":         None,
+    "forecast_data":      None,
+    "last_result":        None,
+    "last_inputs":        {},
+    "report_prefill":     {},
+}
+for k, v in defaults.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
+
+# ── API KEY ──────────────────────────────────────────────────────
+API_KEY = st.secrets["OPENWEATHER_API_KEY"]
+
+# ── INDUSTRY ICONS & DATA ────────────────────────────────────────
+ICONS = {
+    "Agriculture":   "🌾", "Construction":  "🏗️",
+    "Transportation":"🚛", "Tourism":       "📸",
+    "Energy":        "⚡", "Logistics":     "📦",
+    "Healthcare":    "🏥", "Sports/Events": "🏟️",
+    "Marine/Fishing":"⚓"
+}
+
+INDUSTRY_DETAILS = {
+    "Agriculture": {
+        "tasks":        ["Irrigation", "Spraying pesticides", "Plowing", "Harvesting", "Planting"],
+        "sensitive_to": ["Rainfall", "Humidity", "Wind Speed", "Temperature"],
+        "checklist":    ["Check soil moisture before irrigation", "Inspect crops for heat stress",
+                         "Secure greenhouse covers", "Check drainage systems", "Monitor pest activity"]
+    },
+    "Construction": {
+        "tasks":        ["Concrete pouring", "Roofing", "Foundation work", "Steel erection", "Painting"],
+        "sensitive_to": ["Wind Speed", "Rainfall", "Temperature", "Humidity"],
+        "checklist":    ["Inspect scaffolding stability", "Check crane wind limits",
+                         "Cover open materials", "Ensure worker hydration stations", "Verify safety harnesses"]
+    },
+    "Transportation": {
+        "tasks":        ["Highway driving", "Freight delivery", "Air cargo", "Port operations", "Last-mile delivery"],
+        "sensitive_to": ["Rainfall", "Wind Speed", "Visibility"],
+        "checklist":    ["Check tyre pressure", "Inspect brake systems", "Plan alternate routes",
+                         "Brief drivers on conditions", "Monitor traffic alerts"]
+    },
+    "Tourism": {
+        "tasks":        ["Outdoor tours", "Beach activities", "Mountain trekking", "City walks", "Water sports"],
+        "sensitive_to": ["Temperature", "Rainfall", "Wind Speed", "UV Index"],
+        "checklist":    ["Prepare rain gear for guests", "Apply sunscreen if UV is high",
+                         "Brief guides on heat safety", "Check activity permits", "Arrange indoor backup plans"]
+    },
+    "Energy": {
+        "tasks":        ["Solar generation", "Wind turbine ops", "Grid management", "Maintenance", "Load balancing"],
+        "sensitive_to": ["Sunshine", "Wind Speed", "Temperature", "Cloud Cover"],
+        "checklist":    ["Monitor solar panel output", "Check wind turbine RPM limits",
+                         "Review peak load forecast", "Inspect transmission lines", "Coordinate with grid operators"]
+    },
+    "Logistics": {
+        "tasks":        ["Warehouse ops", "Shipment dispatch", "Cold chain management", "Port loading", "Drone delivery"],
+        "sensitive_to": ["Rainfall", "Wind Speed", "Temperature", "Visibility"],
+        "checklist":    ["Reschedule non-urgent deliveries", "Inspect loading dock conditions",
+                         "Check refrigeration units", "Update ETAs for clients", "Verify packaging integrity"]
+    },
+    "Healthcare": {
+        "tasks":        ["Patient transport", "Outdoor clinics", "Emergency response", "Supply delivery", "Staff scheduling"],
+        "sensitive_to": ["Temperature", "Humidity", "Rainfall", "Air Quality"],
+        "checklist":    ["Check ambulance weather readiness", "Brief staff on heat exhaustion signs",
+                         "Inspect outdoor clinic setups", "Ensure cold-chain integrity for medicines", "Review emergency protocols"]
+    },
+    "Sports/Events": {
+        "tasks":        ["Match scheduling", "Outdoor events", "Practice sessions", "Crowd management", "Equipment setup"],
+        "sensitive_to": ["Rainfall", "Wind Speed", "Temperature", "Lightning risk"],
+        "checklist":    ["Inspect playing surface drainage", "Check lightning detection systems",
+                         "Brief staff on evacuation plan", "Prepare covered areas for spectators", "Monitor forecast every hour"]
+    },
+    "Marine/Fishing": {
+        "tasks":        ["Deep sea fishing", "Coastal fishing", "Boat maintenance", "Net deployment", "Port operations"],
+        "sensitive_to": ["Wind Speed", "Rainfall", "Visibility", "Wave Height"],
+        "checklist":    ["Check vessel stability before departure", "Review coast guard advisories",
+                         "Inspect safety equipment", "Brief crew on storm protocol", "Monitor VHF weather channel"]
+    }
+}
+
+HOUR_ADVICE = {
+    "Agriculture":    [(5,10,"Best window — cool temps, low wind. Ideal for spraying and planting."),
+                       (10,14,"Moderate. Avoid pesticide spraying if temp above 35C."),
+                       (14,18,"Hot period. Irrigation recommended. Avoid heavy labor."),
+                       (18,22,"Good for light tasks. Evening is safe for watering.")],
+    "Construction":   [(6,10,"Best window — cooler temperatures. Ideal for concrete pouring."),
+                       (10,13,"Moderate. Monitor wind speed before crane operations."),
+                       (13,16,"Peak heat. Limit outdoor exposure. Mandatory breaks."),
+                       (16,19,"Safe to resume. Good for finishing work.")],
+    "Transportation": [(4,8,"Low traffic. Best for long-haul freight movement."),
+                       (8,12,"Peak traffic. Allow extra time. Monitor road conditions."),
+                       (12,16,"Moderate. Good visibility window if no rain."),
+                       (16,20,"Rush hour. Avoid if rain probability is high.")],
+    "Tourism":        [(6,10,"Best window — cool and pleasant. Ideal for outdoor activities."),
+                       (10,13,"Good for city walks and indoor attractions."),
+                       (13,16,"Hottest period. Schedule indoor visits here."),
+                       (16,20,"Golden hour. Best for sightseeing and photography.")],
+    "Energy":         [(6,18,"Peak solar generation window. Monitor output closely."),
+                       (18,22,"Transition to wind/grid power. Check load balance."),
+                       (22,6,"Off-peak. Ideal for maintenance and inspections.")],
+    "Logistics":      [(5,9,"Best dispatch window. Roads clear. Low traffic."),
+                       (9,13,"Good operations window. Monitor weather closely."),
+                       (13,17,"Busiest roads. Delay non-urgent dispatches."),
+                       (17,22,"Evening window. Good for last-mile delivery.")],
+    "Healthcare":     [(6,10,"Best window for patient transport and outdoor clinics."),
+                       (10,14,"Monitor heat stress in staff and patients."),
+                       (14,18,"Peak heat. Limit non-emergency outdoor movement."),
+                       (18,22,"Good for non-urgent supply deliveries.")],
+    "Sports/Events":  [(6,10,"Best window. Cool conditions. Ideal for morning events."),
+                       (10,13,"Good conditions. Monitor wind and rain closely."),
+                       (13,16,"Peak heat. Ensure hydration stations. Lightning watch."),
+                       (16,20,"Evening events preferred. Good spectator conditions.")],
+    "Marine/Fishing": [(4,8,"Best window. Calm early morning seas. Good for departure."),
+                       (8,12,"Good conditions. Watch for changing wind patterns."),
+                       (12,16,"Moderate. Check updated forecasts before going deep."),
+                       (16,20,"Return to port before nightfall if conditions worsen.")]
+}
+
+EMERGENCY_CONTACTS = {
+    "Australia": {"Disaster": "132 500",       "Police": "000",  "Weather Bureau": "1300 659 210"},
+    "India":     {"Disaster": "1078",           "Police": "100",  "Weather Dept":   "1800-180-1717"},
+    "General":   {"Emergency": "112",           "Weather": "Check local meteorological dept"}
+}
+
+# ================================================================
+# HELPER FUNCTIONS
+# ================================================================
+
+def get_season_encoded(month):
+    if month in [12,1,2]: return 2
+    elif month in [3,4,5]: return 0
+    elif month in [6,7,8]: return 3
+    else: return 1
+
+def get_season_label(month):
+    if month in [12,1,2]: return "Summer ☀️"
+    elif month in [3,4,5]: return "Autumn 🍂"
+    elif month in [6,7,8]: return "Winter ❄️"
+    else: return "Spring 🌸"
+
+def calc_dew_point(temp, humidity):
+    a, b = 17.27, 237.7
+    alpha = ((a * temp) / (b + temp)) + (humidity / 100.0 if humidity > 0 else 0.01)
+    import math
+    dp = (b * alpha) / (a - alpha)
+    return round(dp, 1)
+
+def calc_heat_index(temp, humidity):
+    if temp < 27: return temp
+    hi = (-8.78469475556 + 1.61139411*temp + 2.33854883889*humidity
+          - 0.14611605*temp*humidity - 0.012308094*temp**2
+          - 0.0164248277778*humidity**2 + 0.002211732*temp**2*humidity
+          + 0.00072546*temp*humidity**2 - 0.000003582*temp**2*humidity**2)
+    return round(hi, 1)
+
+def calc_wind_chill(temp, wind_kmh):
+    if temp > 10 or wind_kmh < 5: return temp
+    wc = (13.12 + 0.6215*temp - 11.37*(wind_kmh**0.16) + 0.3965*temp*(wind_kmh**0.16))
+    return round(wc, 1)
+
+def fetch_weather(city):
+    try:
+        url = (f"https://api.openweathermap.org/data/2.5/weather"
+               f"?q={city}&appid={API_KEY}&units=metric")
+        r = requests.get(url, timeout=10)
+        if r.status_code == 200:
+            d = r.json()
+            return {
+                "city":       d["name"],
+                "country":    d["sys"]["country"],
+                "temp":       round(d["main"]["temp"], 1),
+                "feels_like": round(d["main"]["feels_like"], 1),
+                "humidity":   d["main"]["humidity"],
+                "pressure":   d["main"]["pressure"],
+                "wind_speed": round(d["wind"]["speed"] * 3.6, 1),
+                "wind_deg":   d["wind"].get("deg", 0),
+                "visibility": round(d.get("visibility", 0) / 1000, 1),
+                "condition":  d["weather"][0]["description"].title(),
+                "icon_code":  d["weather"][0]["icon"],
+                "clouds":     d["clouds"]["all"],
+                "rainfall":   round(d.get("rain", {}).get("1h", 0), 1),
+                "sunrise":    datetime.fromtimestamp(d["sys"]["sunrise"]).strftime("%H:%M"),
+                "sunset":     datetime.fromtimestamp(d["sys"]["sunset"]).strftime("%H:%M"),
+                "lat":        d["coord"]["lat"],
+                "lon":        d["coord"]["lon"]
+            }
+    except Exception:
+        pass
+    return None
+
+def fetch_forecast(city):
+    try:
+        url = (f"https://api.openweathermap.org/data/2.5/forecast"
+               f"?q={city}&appid={API_KEY}&units=metric&cnt=40")
+        r = requests.get(url, timeout=10)
+        if r.status_code == 200:
+            d = r.json()
+            daily = {}
+            for item in d["list"]:
+                date = item["dt_txt"][:10]
+                if date not in daily:
+                    daily[date] = {
+                        "date":      date,
+                        "temp_max":  item["main"]["temp_max"],
+                        "temp_min":  item["main"]["temp_min"],
+                        "condition": item["weather"][0]["description"].title(),
+                        "rain_prob": round(item.get("pop", 0) * 100),
+                        "humidity":  item["main"]["humidity"],
+                        "wind":      round(item["wind"]["speed"] * 3.6, 1)
+                    }
+                else:
+                    daily[date]["temp_max"] = max(daily[date]["temp_max"], item["main"]["temp_max"])
+                    daily[date]["temp_min"] = min(daily[date]["temp_min"], item["main"]["temp_min"])
+            return list(daily.values())[:5]
+    except Exception:
+        pass
+    return None
+
+def fetch_aqi(lat, lon):
+    try:
+        url = (f"https://api.openweathermap.org/data/2.5/air_pollution"
+               f"?lat={lat}&lon={lon}&appid={API_KEY}")
+        r = requests.get(url, timeout=10)
+        if r.status_code == 200:
+            d   = r.json()
+            aqi = d["list"][0]["main"]["aqi"]
+            labels = {1:"Good",2:"Fair",3:"Moderate",4:"Poor",5:"Very Poor"}
+            colors = {1:"#22c55e",2:"#84cc16",3:"#f59e0b",4:"#f97316",5:"#ff4444"}
+            return {"value": aqi, "label": labels.get(aqi,"Unknown"), "color": colors.get(aqi,"#00b4d8")}
+    except Exception:
+        pass
+    return None
+
+def build_input_dict(h3pm, sunshine, rainfall, wgs, cloud3pm, p3pm, h9am, maxtemp, evap, month):
+    season     = get_season_encoded(month)
+    mintemp    = 12.0
+    p9am       = p3pm + 2.0
+    temp_range = maxtemp - mintemp
+    hum_drop   = h9am - h3pm
+    return {
+        "Location":26,"MinTemp":mintemp,"MaxTemp":maxtemp,
+        "Rainfall":rainfall,"Evaporation":evap,"Sunshine":sunshine,
+        "WindGustDir":8,"WindGustSpeed":wgs,"WindDir9am":8,"WindDir3pm":8,
+        "WindSpeed9am":15.0,"WindSpeed3pm":20.0,
+        "Humidity9am":h9am,"Humidity3pm":h3pm,"Pressure9am":p9am,"Pressure3pm":p3pm,
+        "Cloud9am":4.0,"Cloud3pm":cloud3pm,
+        "Temp9am":maxtemp-7.0,"Temp3pm":maxtemp-2.0,
+        "RainToday":0,"Year":2024,"Month":month,"Season":season,
+        "Temp_Range":temp_range,"Humidity_Drop":hum_drop,"Pressure_Drop":2.0,"Wind_Change":5.0
+    }
+
+def card_class(text):
+    if any(w in text for w in ["Halt","Dangerous","Extreme"]): return "red-card"
+    elif any(w in text for w in ["Avoid","Risk","Delay","Alert","Caution",
+                                  "Allow extra","Plan indoor","Low solar","Limit"]): return "yellow-card"
+    else: return "green-card"
+
+def sev_label(text):
+    if any(w in text for w in ["Halt","Dangerous","Extreme"]): return "DANGER"
+    elif any(w in text for w in ["Avoid","Risk","Delay","Alert","Caution",
+                                  "Allow extra","Plan indoor","Low solar","Limit"]): return "CAUTION"
+    else: return "SAFE"
+
+def explain_prediction(rain_prob, h3pm, sunshine, rainfall, wgs, cloud3pm):
+    reasons = []
+    if h3pm > 70:    reasons.append(f"Humidity at 3pm is high ({h3pm}%) — strong rain indicator")
+    if sunshine < 4: reasons.append(f"Low sunshine ({sunshine} hrs) — cloud cover is high")
+    if rainfall > 5: reasons.append(f"Significant rainfall today ({rainfall} mm) — increases tomorrow's risk")
+    if wgs > 80:     reasons.append(f"High wind gust speed ({wgs} km/h) — storm conditions possible")
+    if cloud3pm > 6: reasons.append(f"Heavy cloud cover at 3pm ({cloud3pm}/8) — rain likely")
+    if not reasons:
+        reasons.append("Clear skies, low humidity and good sunshine — rain unlikely" if rain_prob < 40
+                       else "Moderate conditions — borderline rain probability")
+    return reasons
+
+def get_gonogo(rec_text):
+    sev = sev_label(rec_text)
+    if sev == "DANGER":  return "NO-GO",   "#ff4444", "🚫"
+    elif sev == "CAUTION": return "CAUTION","#f59e0b", "⚠️"
+    else:                  return "GO",     "#22c55e", "✅"
+
+def get_hour_windows(industry, rain_prob, max_temp, wind_speed):
+    windows = HOUR_ADVICE.get(industry, [])
+    result  = []
+    for w in windows:
+        start, end, desc = w
+        risk = "safe"
+        if rain_prob >= 61 or max_temp > 40 or wind_speed > 100: risk = "risky"
+        elif rain_prob >= 40 or max_temp > 35 or wind_speed > 70: risk = "moderate"
+        result.append({"start":start,"end":end,"desc":desc,"risk":risk})
+    return result
+
+def generate_report_text(city, weather, result, recs, level, alerts, industry, rpt_rain, rpt_temp, rpt_wind):
+    now      = datetime.now().strftime("%Y-%m-%d %H:%M")
+    rec_text = recs.get(industry, "No recommendation available.")
+    verdict, v_color, v_icon = get_gonogo(rec_text)
+    sev     = sev_label(rec_text)
+    details = INDUSTRY_DETAILS.get(industry, {})
+
+    temp_c   = weather.get("temp",       "N/A")
+    feels    = weather.get("feels_like", "N/A")
+    humidity = weather.get("humidity",   "N/A")
+    wind     = weather.get("wind_speed", "N/A")
+    pressure = weather.get("pressure",   "N/A")
+    vis      = weather.get("visibility", "N/A")
+    cond     = weather.get("condition",  "N/A")
+    sunrise  = weather.get("sunrise",    "N/A")
+    sunset   = weather.get("sunset",     "N/A")
+    country  = weather.get("country",    "")
+
+    weather_desc = (
+        f"Current conditions in {city}{', ' + country if country else ''} show {cond.lower()} "
+        f"with a temperature of {temp_c}°C (feels like {feels}°C). Relative humidity stands at "
+        f"{humidity}%, atmospheric pressure at {pressure} hPa, and visibility is {vis} km. "
+        f"Wind speed is recorded at {wind} km/h. Sunrise occurred at {sunrise} and sunset "
+        f"is expected at {sunset}. These conditions form the basis for the analysis below."
+    )
+
+    if result:
+        rp      = result['rain_prob']
+        rp_desc = ("very low" if rp < 20 else "low" if rp < 40 else
+                   "moderate" if rp < 61 else "high" if rp < 80 else "very high")
+        pred_desc = (
+            f"The XGBoost rain classifier predicts a {rp}% probability of rainfall tomorrow, "
+            f"classified as {rp_desc}. The model uses an optimized decision threshold of 0.61, "
+            f"meaning rain is predicted as {'likely' if rp >= 61 else 'unlikely'} for tomorrow. "
+            f"The predicted maximum temperature is {result['temp_pred']}°C, generated by the "
+            f"XGBoost regression model (R2 = 0.8913). The classifier was trained on 142,193 "
+            f"records and achieves 85% accuracy with an AUC of 0.9305. Key drivers of this "
+            f"prediction include Humidity3pm (importance: 0.28), Sunshine hours (0.11), "
+            f"and Rainfall (0.07)."
+        )
+    else:
+        pred_desc = (
+            "No ML prediction was run prior to generating this report. To include a rain "
+            "probability and temperature forecast, visit the Predict page, run the XGBoost "
+            "model with your weather inputs, then return here to regenerate the report."
+        )
+
+    if sev == "DANGER":
+        risk_desc = (
+            f"Current weather conditions represent a DANGER level risk for {industry} operations. "
+            f"The combination of rain probability ({rpt_rain}%), temperature ({rpt_temp}°C), and "
+            f"wind speed ({rpt_wind} km/h) exceeds safe operational thresholds. All outdoor and "
+            f"high-exposure tasks should be immediately suspended. Personnel should be moved to "
+            f"safe locations and operations resumed only after conditions improve significantly "
+            f"and a formal safety assessment is completed by the site supervisor."
+        )
+    elif sev == "CAUTION":
+        risk_desc = (
+            f"Weather conditions require heightened CAUTION for {industry} operations. With rain "
+            f"probability at {rpt_rain}% and temperature at {rpt_temp}°C, conditions are not "
+            f"fully safe but allow essential work to continue under active monitoring. Supervisors "
+            f"should conduct hourly weather checks and be prepared to suspend activities if "
+            f"conditions deteriorate. Non-critical tasks should be deferred where possible."
+        )
+    else:
+        risk_desc = (
+            f"Weather conditions are SAFE for {industry} operations today. With rain probability "
+            f"at {rpt_rain}%, temperature at {rpt_temp}°C, and wind speed at {rpt_wind} km/h, "
+            f"all standard activities can proceed normally. Teams should continue following "
+            f"standard safety protocols and remain alert to any sudden changes in local conditions."
+        )
+
+    hour_windows = get_hour_windows(industry, rpt_rain, rpt_temp, rpt_wind)
+    best_windows = [f"{w['start']:02d}:00-{w['end']:02d}:00" for w in hour_windows if w["risk"] == "safe"]
+    best_str     = ", ".join(best_windows) if best_windows else "Reassess based on conditions"
+
+    lines = [
+        "=" * 65,
+        "  WEATHER INTELLIGENCE REPORT",
+        f"  Location  : {city}{', ' + country if country else ''}",
+        f"  Industry  : {industry}  {ICONS.get(industry,'')}",
+        f"  Generated : {now}",
+        f"  Risk Level: {level.upper()}  |  Verdict: {verdict}",
+        "=" * 65,
+        "",
+        "SECTION 1 - CURRENT WEATHER CONDITIONS",
+        "-" * 65,
+        "",
+        weather_desc,
+        "",
+        "  Summary Metrics:",
+        f"    Temperature    : {temp_c}°C  (Feels like {feels}°C)",
+        f"    Humidity       : {humidity}%",
+        f"    Wind Speed     : {wind} km/h",
+        f"    Pressure       : {pressure} hPa",
+        f"    Visibility     : {vis} km",
+        f"    Condition      : {cond}",
+        f"    Sunrise/Sunset : {sunrise} / {sunset}",
+        "",
+        "SECTION 2 - ML PREDICTION ANALYSIS",
+        "-" * 65,
+        "",
+        pred_desc,
+        "",
+    ]
+    if result:
+        lines += [
+            "  Prediction Output:",
+            f"    Rain Probability     : {result['rain_prob']}%",
+            f"    Rain Prediction      : {result['rain_pred']}",
+            f"    Temperature Forecast : {result['temp_pred']}°C",
+            f"    Decision Threshold   : 0.61 (Optimized)",
+            f"    Classifier Accuracy  : 85.00%  |  AUC: 0.9305",
+            f"    Regressor R2         : 0.8913",
+            "",
+        ]
+    lines += [
+        "SECTION 3 - RISK ASSESSMENT",
+        "-" * 65,
+        "",
+        f"  Overall Risk Level : {level.upper()}",
+        f"  Input Parameters   : Rain {rpt_rain}% | Temp {rpt_temp}°C | Wind {rpt_wind} km/h",
+        f"  Active Alerts      :",
+    ]
+    for alert in alerts:
+        lines.append(f"    - {alert}")
+    lines += [
+        "",
+        risk_desc,
+        "",
+        "SECTION 4 - INDUSTRY ANALYSIS",
+        "-" * 65,
+        "",
+        f"  Industry            : {industry}  {ICONS.get(industry,'')}",
+        f"  Operational Verdict : {v_icon} {verdict}",
+        f"  Severity Level      : {sev}",
+        "",
+        "  Weather Impact Assessment:",
+        f"  {rec_text}",
+        "",
+        f"  Sensitive to         : {', '.join(details.get('sensitive_to', []))}",
+        f"  Best Working Windows : {best_str}",
+        "",
+        "  Hour-by-Hour Operational Planner:",
+    ]
+    for hw in hour_windows:
+        risk_tag = "[SAFE]    " if hw["risk"]=="safe" else "[MODERATE]" if hw["risk"]=="moderate" else "[RISKY]   "
+        lines.append(f"    {risk_tag}  {hw['start']:02d}:00 - {hw['end']:02d}:00  |  {hw['desc']}")
+    lines += ["", "  Task Status for Today:"]
+    for task in details.get("tasks", []):
+        status = "[ PROCEED ]" if verdict != "NO-GO" else "[ SUSPEND ]"
+        lines.append(f"    {status}  {task}")
+    lines += ["", "  Safety Checklist:"]
+    for item in details.get("checklist", []):
+        lines.append(f"    [ ] {item}")
+    lines += [
+        "",
+        "SECTION 5 - OPERATIONAL RECOMMENDATIONS",
+        "-" * 65,
+        "",
+        f"  Based on current weather in {city} and the ML forecast,",
+        f"  the following guidance applies for {industry} operations:",
+        "",
+        f"  {rec_text}",
+        "",
+        "  General Advisory:",
+        "  Monitor conditions every 2 hours. If rain probability rises above 61%",
+        "  or wind speed exceeds 90 km/h, escalate to the next risk level and",
+        f"  review all active tasks. All team members should be briefed on the",
+        f"  current {level.lower()} risk status and have access to emergency contacts.",
+        "",
+        "=" * 65,
+        "  Report generated by WeatherAI Climate Intelligence System",
+        "  Powered by XGBoost Classifier + Regressor | OpenWeather API",
+        "=" * 65,
+    ]
+    return "\n".join(lines)
+
+# ================================================================
+# CSS
+# ================================================================
+
+def load_css():
+    st.markdown("""
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+    #MainMenu, footer, header {visibility: hidden;}
+    .block-container {padding: 0 !important; max-width: 100% !important;}
+    section[data-testid="stSidebar"] {display: none !important;}
+    div[data-testid="stDecoration"] {display: none !important;}
+
+    ::-webkit-scrollbar {width: 5px;}
+    ::-webkit-scrollbar-track {background: #0a1628;}
+    ::-webkit-scrollbar-thumb {background: #00b4d8; border-radius: 3px;}
+
+    html, body, .stApp {
+        background: #0d1b2a !important;
+        font-family: 'Inter', sans-serif !important;
+        color: #ffffff !important;
+    }
+
+    .navbar-wrap {
+        background: rgba(9,20,33,0.97); backdrop-filter: blur(12px);
+        border-bottom: 1px solid rgba(0,180,216,0.2); padding: 0 2rem;
+        position: sticky; top: 0; z-index: 999;
+    }
+    .nav-logo {
+        font-size: 17px; font-weight: 700; color: #00b4d8 !important;
+        letter-spacing: 0.06em; margin: 0; padding: 16px 0;
+    }
+
+    .stButton > button {
+        background: transparent !important; border: none !important;
+        color: rgba(255,255,255,0.45) !important; font-size: 13px !important;
+        font-family: 'Inter', sans-serif !important; padding: 7px 18px !important;
+        border-radius: 999px !important; transition: all 0.3s ease !important; font-weight: 400 !important;
+    }
+    .stButton > button:hover {
+        background: rgba(255,255,255,0.07) !important; color: rgba(255,255,255,0.85) !important;
+    }
+    .nav-active .stButton > button {
+        background: rgba(0,180,216,0.18) !important; color: #00b4d8 !important;
+        box-shadow: 0 0 18px rgba(0,180,216,0.35) !important; font-weight: 600 !important;
+    }
+    .action-btn .stButton > button {
+        background: linear-gradient(135deg,#00b4d8,#0077b6) !important;
+        color: #fff !important; font-weight: 600 !important; padding: 10px 28px !important;
+        font-size: 14px !important; box-shadow: 0 4px 20px rgba(0,180,216,0.4) !important;
+        border-radius: 999px !important;
+    }
+    .action-btn .stButton > button:hover {
+        transform: translateY(-2px) !important;
+        box-shadow: 0 6px 28px rgba(0,180,216,0.6) !important; color: #fff !important;
+    }
+
+    .w-card {
+        background: linear-gradient(135deg,#162334 0%,#1b2e42 100%);
+        border: 1px solid rgba(0,180,216,0.15); border-radius: 16px; padding: 1.4rem;
+        transition: all 0.3s ease; animation: fadeUp 0.5s ease both;
+    }
+    .w-card:hover {
+        transform: translateY(-4px); border-color: rgba(0,180,216,0.5);
+        box-shadow: 0 10px 36px rgba(0,180,216,0.18);
+    }
+    .m-card {
+        background: linear-gradient(135deg,#111f30 0%,#1a2d40 100%);
+        border: 1px solid rgba(0,180,216,0.12); border-radius: 14px; padding: 1rem;
+        text-align: center; transition: all 0.3s ease; animation: fadeUp 0.6s ease both;
+    }
+    .m-card:hover { transform: translateY(-4px); border-color: rgba(0,180,216,0.4); box-shadow: 0 8px 28px rgba(0,180,216,0.15); }
+    .m-icon {font-size: 26px; margin-bottom: 5px;}
+    .m-val  {font-size: 22px; font-weight: 700; color: #00b4d8;}
+    .m-lbl  {font-size: 10px; color: rgba(255,255,255,0.45); margin-top: 3px; letter-spacing: 0.08em; text-transform: uppercase;}
+
+    .forecast-card {
+        background: linear-gradient(135deg,#111f30 0%,#1a2d40 100%);
+        border: 1px solid rgba(0,180,216,0.12); border-radius: 14px; padding: 1rem;
+        text-align: center; transition: all 0.3s ease; animation: fadeUp 0.5s ease both;
+    }
+    .forecast-card:hover { transform: translateY(-4px); border-color: rgba(0,180,216,0.4); box-shadow: 0 8px 24px rgba(0,180,216,0.15); }
+
+    .green-card  { background: linear-gradient(135deg,#0d2e1a 0%,#162334 100%); border: 1px solid rgba(34,197,94,0.35);  border-radius: 14px; padding: 1.2rem; transition: all 0.3s ease; animation: fadeUp 0.5s ease both; }
+    .green-card:hover  { transform:translateY(-4px); box-shadow:0 8px 24px rgba(34,197,94,0.2); }
+    .yellow-card { background: linear-gradient(135deg,#2a1f08 0%,#1b2838 100%); border: 1px solid rgba(245,158,11,0.35); border-radius: 14px; padding: 1.2rem; transition: all 0.3s ease; animation: fadeUp 0.5s ease both; }
+    .yellow-card:hover { transform:translateY(-4px); box-shadow:0 8px 24px rgba(245,158,11,0.2); }
+    .red-card    { background: linear-gradient(135deg,#2a0d0d 0%,#1b2838 100%); border: 1px solid rgba(255,68,68,0.35);  border-radius: 14px; padding: 1.2rem; transition: all 0.3s ease; animation: fadeUp 0.5s ease both; }
+    .red-card:hover    { transform:translateY(-4px); box-shadow:0 8px 24px rgba(255,68,68,0.2); }
+
+    .sec-title { font-size: 22px; font-weight: 700; color: #fff; margin-bottom: 0.4rem; border-left: 3px solid #00b4d8; padding-left: 12px; }
+    .sec-sub   { font-size: 13px; color: rgba(255,255,255,0.4); margin-bottom: 1.5rem; padding-left: 15px; }
+
+    .badge-yes    { display:inline-block; background:rgba(255,68,68,0.15);  border:1px solid #ff4444; color:#ff4444; font-size:13px; font-weight:700; padding:6px 20px; border-radius:999px; }
+    .badge-no     { display:inline-block; background:rgba(34,197,94,0.15); border:1px solid #22c55e; color:#22c55e; font-size:13px; font-weight:700; padding:6px 20px; border-radius:999px; }
+    .badge-low    { background:rgba(34,197,94,0.15);  border:1px solid #22c55e; color:#22c55e; font-size:18px; font-weight:700; padding:10px 32px; border-radius:999px; display:inline-block; }
+    .badge-medium { background:rgba(245,158,11,0.15); border:1px solid #f59e0b; color:#f59e0b; font-size:18px; font-weight:700; padding:10px 32px; border-radius:999px; display:inline-block; }
+    .badge-high   { background:rgba(255,68,68,0.15);  border:1px solid #ff4444; color:#ff4444; font-size:18px; font-weight:700; padding:10px 32px; border-radius:999px; display:inline-block; animation: pulseRed 1.2s ease-in-out infinite; }
+
+    .red-pulse-border { position:fixed; top:0; left:0; right:0; bottom:0; border:4px solid rgba(255,68,68,0.0); pointer-events:none; z-index:9999; animation: borderPulse 1.2s ease-in-out infinite; }
+
+    .high-risk-banner { background:rgba(255,68,68,0.12); border:1px solid rgba(255,68,68,0.4); border-radius:12px; padding:12px 20px; text-align:center; font-size:14px; font-weight:700; color:#ff4444; animation: pulseRed 1.5s ease-in-out infinite; margin-bottom:1rem; }
+
+    .stats-bar { background:rgba(0,180,216,0.05); border:1px solid rgba(0,180,216,0.12); border-radius:12px; padding:12px 2rem; display:flex; gap:2rem; align-items:center; flex-wrap:wrap; margin-top:1.5rem; }
+    .stat-item { font-size:12px; color:rgba(255,255,255,0.45); }
+    .stat-item span { color:#00b4d8; font-weight:600; }
+
+    .alert-item { background:rgba(255,68,68,0.08); border-left:3px solid #ff4444; border-radius:8px; padding:10px 16px; margin-bottom:8px; font-size:13px; color:rgba(255,255,255,0.85); animation:fadeUp 0.4s ease both; }
+    .hist-card  { background:rgba(0,180,216,0.04); border:1px solid rgba(0,180,216,0.12); border-radius:10px; padding:10px 14px; font-size:12px; color:rgba(255,255,255,0.65); margin-bottom:8px; animation:fadeUp 0.3s ease both; }
+
+    .hour-safe     { background:rgba(34,197,94,0.08);  border-left:3px solid #22c55e; border-radius:8px; padding:10px 14px; margin-bottom:8px; font-size:12px; }
+    .hour-moderate { background:rgba(245,158,11,0.08); border-left:3px solid #f59e0b; border-radius:8px; padding:10px 14px; margin-bottom:8px; font-size:12px; }
+    .hour-risky    { background:rgba(255,68,68,0.08);  border-left:3px solid #ff4444; border-radius:8px; padding:10px 14px; margin-bottom:8px; font-size:12px; }
+
+    .gonogo-go      { background:rgba(34,197,94,0.12);  border:2px solid #22c55e; border-radius:16px; padding:20px; text-align:center; }
+    .gonogo-caution { background:rgba(245,158,11,0.12); border:2px solid #f59e0b; border-radius:16px; padding:20px; text-align:center; }
+    .gonogo-nogo    { background:rgba(255,68,68,0.12);  border:2px solid #ff4444; border-radius:16px; padding:20px; text-align:center; animation:pulseRed 1.5s ease-in-out infinite; }
+
+    .checklist-item { background:rgba(0,180,216,0.04); border-radius:8px; padding:8px 14px; margin-bottom:6px; font-size:12px; color:rgba(255,255,255,0.7); border-left:2px solid rgba(0,180,216,0.3); }
+    .reason-item    { background:rgba(0,180,216,0.06); border-radius:8px; padding:8px 14px; margin-bottom:6px; font-size:12px; color:rgba(255,255,255,0.75); border-left:2px solid #00b4d8; animation:fadeUp 0.3s ease both; }
+
+    .page-wrap { padding: 2rem 2.5rem; }
+    .divider   { border:none; border-top:1px solid rgba(0,180,216,0.1); margin:1.2rem 0; }
+
+    .season-badge { display:inline-block; background:rgba(0,180,216,0.1); border:1px solid rgba(0,180,216,0.3); color:#00b4d8; font-size:11px; padding:3px 12px; border-radius:999px; }
+
+    .sev-safe   { color:#22c55e; font-size:10px; font-weight:700; background:rgba(34,197,94,0.1);  padding:2px 8px; border-radius:999px; }
+    .sev-caution{ color:#f59e0b; font-size:10px; font-weight:700; background:rgba(245,158,11,0.1); padding:2px 8px; border-radius:999px; }
+    .sev-danger { color:#ff4444; font-size:10px; font-weight:700; background:rgba(255,68,68,0.1);  padding:2px 8px; border-radius:999px; }
+
+    .footer { background:#060f19; border-top:1px solid rgba(0,180,216,0.12); padding:20px 2rem; text-align:center; font-size:12px; color:rgba(255,255,255,0.3); letter-spacing:0.04em; }
+    .footer span { color:#00b4d8; }
+
+    .report-box { background:#060f19; border:1px solid rgba(0,180,216,0.15); border-radius:12px; padding:1.2rem; font-family:monospace; font-size:11px; color:rgba(255,255,255,0.65); line-height:1.8; white-space:pre-wrap; max-height:420px; overflow-y:auto; }
+
+    .insight-card { background:linear-gradient(135deg,#111f30 0%,#1a2d40 100%); border:1px solid rgba(0,180,216,0.15); border-radius:14px; padding:1.2rem; animation:fadeUp 0.5s ease both; transition:all 0.3s ease; }
+    .insight-card:hover { border-color:rgba(0,180,216,0.4); box-shadow:0 8px 24px rgba(0,180,216,0.12); }
+
+    .contact-card { background:rgba(0,180,216,0.05); border:1px solid rgba(0,180,216,0.15); border-radius:10px; padding:10px 14px; margin-bottom:8px; font-size:12px; color:rgba(255,255,255,0.7); }
+
+    .toast { position:fixed; bottom:28px; right:28px; background:rgba(0,180,216,0.15); border:1px solid #00b4d8; border-radius:12px; padding:12px 20px; font-size:13px; color:#00b4d8; font-weight:600; z-index:9998; animation:fadeUp 0.4s ease both; }
+
+    .filter-btn .stButton > button { background:rgba(0,180,216,0.08) !important; border:1px solid rgba(0,180,216,0.2) !important; color:rgba(255,255,255,0.6) !important; font-size:12px !important; padding:5px 14px !important; border-radius:8px !important; }
+
+    .stSlider [data-baseweb="slider"] div[role="slider"] { background:#00b4d8 !important; }
+    .stNumberInput input, .stTextInput input { background:#111f30 !important; border:1px solid rgba(0,180,216,0.25) !important; color:#fff !important; border-radius:8px !important; }
+
+    .history-chart-wrap { background:linear-gradient(135deg,#111f30 0%,#1a2d40 100%); border:1px solid rgba(0,180,216,0.15); border-radius:14px; padding:1.2rem; }
+
+    .copy-btn .stButton > button { background:rgba(0,180,216,0.1) !important; border:1px solid rgba(0,180,216,0.3) !important; color:#00b4d8 !important; font-size:11px !important; padding:4px 12px !important; border-radius:6px !important; }
+
+    @keyframes fadeUp    { from {opacity:0; transform:translateY(16px);}  to {opacity:1; transform:translateY(0);} }
+    @keyframes pulseRed  { 0%,100% {box-shadow:0 0 0 0 rgba(255,68,68,0);} 50% {box-shadow:0 0 24px 6px rgba(255,68,68,0.45);} }
+    @keyframes borderPulse { 0%,100% {border-color:rgba(255,68,68,0.2);} 50% {border-color:rgba(255,68,68,0.75);} }
+    </style>
+    """, unsafe_allow_html=True)
+
+# ================================================================
+# PARTICLES
+# ================================================================
+
+def inject_particles():
+    st.markdown("""
+    <script>
+    (function(){
+        if(document.getElementById('wai-pts')) return;
+        var c=document.createElement('canvas');
+        c.id='wai-pts';
+        c.style.cssText='position:fixed;top:0;left:0;width:100%;height:100%;z-index:0;pointer-events:none;opacity:0.3;';
+        document.body.appendChild(c);
+        var x=c.getContext('2d');
+        function sz(){c.width=innerWidth;c.height=innerHeight;}
+        sz(); window.addEventListener('resize',sz);
+        var pts=Array.from({length:55},function(){
+            return{x:Math.random()*c.width,y:Math.random()*c.height,
+                   r:Math.random()*1.8+0.4,dx:(Math.random()-0.5)*0.3,dy:(Math.random()-0.5)*0.3,a:Math.random()*0.45+0.15};
+        });
+        function draw(){
+            x.clearRect(0,0,c.width,c.height);
+            pts.forEach(function(p){
+                x.beginPath();x.arc(p.x,p.y,p.r,0,Math.PI*2);
+                x.fillStyle='rgba(0,180,216,'+p.a+')';x.fill();
+                p.x+=p.dx;p.y+=p.dy;
+                if(p.x<0||p.x>c.width)p.dx*=-1;
+                if(p.y<0||p.y>c.height)p.dy*=-1;
+            });
+            requestAnimationFrame(draw);
+        }
+        draw();
+    })();
+    </script>
+    """, unsafe_allow_html=True)
+
+# ================================================================
+# NAVBAR
+# ================================================================
+
+def show_navbar():
+    pages = ["Home","Predict","Recommend","Alerts","Report","Insights","History"]
+    icons = {"Home":"🏠","Predict":"🔮","Recommend":"💡","Alerts":"🚨","Report":"📄","Insights":"📊","History":"🕐"}
+    st.markdown('<div class="navbar-wrap">', unsafe_allow_html=True)
+    cols = st.columns([2.0, 0.8, 0.8, 1.1, 0.9, 0.9, 1.0, 0.9, 0.8])
+    with cols[0]:
+        st.markdown('<p class="nav-logo">🌦️ WeatherAI</p>', unsafe_allow_html=True)
+    for col, page in zip(cols[1:], pages):
+        with col:
+            active = st.session_state.page == page
+            if active: st.markdown('<div class="nav-active">', unsafe_allow_html=True)
+            if st.button(f"{icons[page]} {page}", key=f"nav_{page}", use_container_width=True):
+                st.session_state.page = page
+                st.rerun()
+            if active: st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+# ================================================================
+# FOOTER
+# ================================================================
+
+def show_footer():
+    st.markdown("""
+    <div class="footer">
+        <span>WeatherAI</span> — AI-Based Weather &amp; Climate Intelligence System &nbsp;|&nbsp;
+        <span>J. Charan Reddy</span> &nbsp;|&nbsp; Reg: <span>23BCB7120</span> &nbsp;|&nbsp;
+        Powered by XGBoost + OpenWeather API &nbsp;|&nbsp;
+        Accuracy: <span>85%</span> &nbsp;|&nbsp; AUC: <span>0.9305</span>
+    </div>
+    """, unsafe_allow_html=True)
+
+# ================================================================
+# PAGE 1 — HOME
+# ================================================================
+
+def page_home():
+    st.markdown('<div class="page-wrap">', unsafe_allow_html=True)
+    st.markdown('<div class="sec-title">Live Weather Intelligence</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sec-sub">Search any city for real-time weather. Compare two cities side by side. 5-day forecast included. AQI available for City 1 only.</div>', unsafe_allow_html=True)
+
+    col_a, col_b = st.columns(2)
+    for col, label, key_city, key_data in [
+        (col_a, "City 1", "city1_input", "city1_data"),
+        (col_b, "City 2 — Compare (no AQI/forecast)", "city2_input", "city2_data")
+    ]:
+        with col:
+            st.markdown('<div class="w-card">', unsafe_allow_html=True)
+            st.markdown(f'<div style="font-size:12px;color:rgba(255,255,255,0.4);margin-bottom:8px;letter-spacing:0.06em;text-transform:uppercase;">{label}</div>', unsafe_allow_html=True)
+            city_inp = st.text_input("City", key=key_city, placeholder="e.g. Sydney, Mumbai, Chennai...", label_visibility="collapsed")
+            st.markdown('<div class="action-btn">', unsafe_allow_html=True)
+            searched = st.button("🔍 Search Weather", key=f"srch_{key_city}", use_container_width=True)
+            st.markdown('</div>', unsafe_allow_html=True)
+
+            if searched and city_inp:
+                with st.spinner(f"Fetching {city_inp}..."):
+                    data = fetch_weather(city_inp)
+                    if data:
+                        st.session_state[key_data] = data
+                        if key_data == "city1_data":
+                            st.session_state.prefill = {
+                                "humidity3pm":     data["humidity"],
+                                "wind_gust_speed": data["wind_speed"],
+                                "pressure3pm":     float(data["pressure"]),
+                                "max_temp":        data["temp"]
+                            }
+                            fc = fetch_forecast(city_inp)
+                            if fc: st.session_state.forecast_data = fc
+                            aqi = fetch_aqi(data["lat"], data["lon"])
+                            if aqi: st.session_state[key_data]["aqi"] = aqi
+                    else:
+                        st.error("City not found. Check spelling and try again.")
+
+            data = st.session_state.get(key_data)
+            if data:
+                temp_c   = data["temp"]
+                humidity = data["humidity"]
+                wind_spd = data["wind_speed"]
+                dew      = calc_dew_point(temp_c, humidity)
+                hi       = calc_heat_index(temp_c, humidity)
+                wc       = calc_wind_chill(temp_c, wind_spd)
+
+                st.markdown(f"""
+                <div style="margin-top:1rem;">
+                    <div style="font-size:20px;font-weight:700;">{data['city']}, {data['country']}</div>
+                    <div style="font-size:13px;color:rgba(255,255,255,0.4);margin-bottom:8px;">{data['condition']}</div>
+                    <span class="season-badge">{get_season_label(datetime.now().month)}</span>
+                    &nbsp;
+                    <img src="https://openweathermap.org/img/wn/{data['icon_code']}@2x.png"
+                         style="width:40px;height:40px;vertical-align:middle;margin-left:8px;">
+                </div>
+                """, unsafe_allow_html=True)
+                st.markdown('<hr class="divider">', unsafe_allow_html=True)
+
+                r1c1, r1c2, r1c3 = st.columns(3)
+                for mc, icon, val, lbl in [
+                    (r1c1,"🌡️",f"{temp_c}°C","Temperature"),
+                    (r1c2,"💧",f"{humidity}%","Humidity"),
+                    (r1c3,"💨",f"{wind_spd} km/h","Wind Speed")
+                ]:
+                    with mc: st.markdown(f'<div class="m-card"><div class="m-icon">{icon}</div><div class="m-val">{val}</div><div class="m-lbl">{lbl}</div></div>', unsafe_allow_html=True)
+
+                r2c1, r2c2, r2c3 = st.columns(3)
+                for mc, icon, val, lbl in [
+                    (r2c1,"🔵",f"{data['pressure']} hPa","Pressure"),
+                    (r2c2,"👁️",f"{data['visibility']} km","Visibility"),
+                    (r2c3,"🌧️",f"{data['rainfall']} mm","Rainfall")
+                ]:
+                    with mc: st.markdown(f'<div class="m-card" style="margin-top:8px;"><div class="m-icon">{icon}</div><div class="m-val">{val}</div><div class="m-lbl">{lbl}</div></div>', unsafe_allow_html=True)
+
+                r3c1, r3c2, r3c3, r3c4 = st.columns(4)
+                aqi_data = data.get("aqi")
+                aqi_val  = aqi_data["label"] if aqi_data else ("N/A — City 1 only" if key_data=="city2_data" else "N/A")
+                aqi_col  = aqi_data["color"] if aqi_data else "#00b4d8"
+                for mc, icon, val, lbl, col in [
+                    (r3c1,"🌅",data.get("sunrise","N/A"),"Sunrise","#00b4d8"),
+                    (r3c2,"🌇",data.get("sunset","N/A"),"Sunset","#00b4d8"),
+                    (r3c3,"🤔",f"{data.get('feels_like','N/A')}°C","Feels Like","#00b4d8"),
+                    (r3c4,"🌬️",aqi_val,"Air Quality",aqi_col)
+                ]:
+                    with mc: st.markdown(f'<div class="m-card" style="margin-top:8px;"><div class="m-icon">{icon}</div><div class="m-val" style="color:{col};font-size:16px;">{val}</div><div class="m-lbl">{lbl}</div></div>', unsafe_allow_html=True)
+
+                # Dew Point / Heat Index / Wind Chill
+                r4c1, r4c2, r4c3 = st.columns(3)
+                for mc, icon, val, lbl in [
+                    (r4c1,"💦",f"{dew}°C","Dew Point"),
+                    (r4c2,"🥵",f"{hi}°C","Heat Index"),
+                    (r4c3,"🥶",f"{wc}°C","Wind Chill")
+                ]:
+                    with mc: st.markdown(f'<div class="m-card" style="margin-top:8px;"><div class="m-icon">{icon}</div><div class="m-val" style="font-size:18px;">{val}</div><div class="m-lbl">{lbl}</div></div>', unsafe_allow_html=True)
+
+                st.markdown('<div style="margin-top:1.2rem;"></div>', unsafe_allow_html=True)
+                cc1, cc2 = st.columns(2)
+                with cc1:
+                    st.markdown('<div style="font-size:11px;color:rgba(255,255,255,0.35);text-transform:uppercase;letter-spacing:0.07em;margin-bottom:4px;">Wind Direction</div>', unsafe_allow_html=True)
+                    fig_c = go.Figure(go.Scatterpolar(
+                        r=[0,0.85], theta=[0,data["wind_deg"]], mode='lines+markers',
+                        line=dict(color='#00b4d8',width=3), marker=dict(size=[4,10],color='#00b4d8')
+                    ))
+                    fig_c.update_layout(
+                        polar=dict(
+                            radialaxis=dict(visible=False,range=[0,1]),
+                            angularaxis=dict(tickmode='array',tickvals=[0,45,90,135,180,225,270,315],
+                                            ticktext=['N','NE','E','SE','S','SW','W','NW'],
+                                            direction='clockwise',rotation=90,
+                                            tickfont=dict(color='rgba(255,255,255,0.55)',size=10)),
+                            bgcolor='rgba(17,31,48,0.8)'
+                        ),
+                        paper_bgcolor='rgba(0,0,0,0)', margin=dict(t=10,b=10,l=10,r=10), height=165
+                    )
+                    st.plotly_chart(fig_c, use_container_width=True, config={"displayModeBar":False})
+                with cc2:
+                    st.markdown('<div style="font-size:11px;color:rgba(255,255,255,0.35);text-transform:uppercase;letter-spacing:0.07em;margin-bottom:4px;">Humidity</div>', unsafe_allow_html=True)
+                    hum   = data["humidity"]
+                    fig_d = go.Figure(go.Pie(values=[hum,100-hum],hole=0.72,
+                                            marker_colors=['#00b4d8','rgba(255,255,255,0.04)'],
+                                            textinfo='none',showlegend=False))
+                    fig_d.add_annotation(text=f"<b>{hum}%</b>",x=0.5,y=0.5,
+                                         font=dict(size=20,color='#00b4d8'),showarrow=False)
+                    fig_d.update_layout(paper_bgcolor='rgba(0,0,0,0)',margin=dict(t=10,b=10,l=10,r=10),height=165)
+                    st.plotly_chart(fig_d, use_container_width=True, config={"displayModeBar":False})
+
+                if key_data == "city1_data":
+                    st.markdown('<div class="action-btn" style="margin-top:0.8rem;">', unsafe_allow_html=True)
+                    if st.button("🔮 Use This Weather for Prediction", key="to_predict", use_container_width=True):
+                        st.session_state.page = "Predict"
+                        st.rerun()
+                    st.markdown('</div>', unsafe_allow_html=True)
+            st.markdown('</div>', unsafe_allow_html=True)
+
+    # City comparison table
+    d1 = st.session_state.get("city1_data")
+    d2 = st.session_state.get("city2_data")
+    if d1 and d2:
+        st.markdown('<div style="margin-top:1.5rem;"></div>', unsafe_allow_html=True)
+        st.markdown('<div class="sec-title" style="font-size:16px;">⚖️ Side-by-Side Comparison</div>', unsafe_allow_html=True)
+        fig_comp = go.Figure()
+        metrics  = ["Temp (°C)","Humidity (%)","Wind (km/h)","Pressure (hPa)","Visibility (km)"]
+        v1 = [d1["temp"],d1["humidity"],d1["wind_speed"],d1["pressure"],d1["visibility"]]
+        v2 = [d2["temp"],d2["humidity"],d2["wind_speed"],d2["pressure"],d2["visibility"]]
+        fig_comp.add_trace(go.Bar(name=d1["city"],x=metrics,y=v1,marker_color='#00b4d8',text=[str(x) for x in v1],textposition='outside',textfont=dict(color='white',size=11)))
+        fig_comp.add_trace(go.Bar(name=d2["city"],x=metrics,y=v2,marker_color='#0077b6',text=[str(x) for x in v2],textposition='outside',textfont=dict(color='white',size=11)))
+        fig_comp.update_layout(
+            barmode='group', paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+            legend=dict(font=dict(color='white',size=11)),
+            xaxis=dict(tickfont=dict(color='rgba(255,255,255,0.7)',size=11),showgrid=False),
+            yaxis=dict(tickfont=dict(color='rgba(255,255,255,0.4)',size=10),gridcolor='rgba(255,255,255,0.05)'),
+            margin=dict(t=20,b=10,l=10,r=10), height=280
+        )
+        st.plotly_chart(fig_comp, use_container_width=True, config={"displayModeBar":False})
+
+    # 5-day forecast
+    fc = st.session_state.get("forecast_data")
+    if fc:
+        st.markdown('<div style="margin-top:1.5rem;"></div>', unsafe_allow_html=True)
+        st.markdown('<div class="sec-title" style="font-size:16px;">📅 5-Day Forecast — City 1 only</div>', unsafe_allow_html=True)
+        fcols = st.columns(5)
+        day_names = ["Today","Tomorrow","Day 3","Day 4","Day 5"]
+        for i, (fc_col, day) in enumerate(zip(fcols, fc)):
+            with fc_col:
+                rain_color = "#ff4444" if day["rain_prob"]>=61 else "#f59e0b" if day["rain_prob"]>=40 else "#22c55e"
+                st.markdown(f"""
+                <div class="forecast-card">
+                    <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-bottom:4px;">{day_names[i]}</div>
+                    <div style="font-size:10px;color:rgba(255,255,255,0.3);">{day['date']}</div>
+                    <div style="font-size:22px;margin:8px 0;">{"🌧️" if day['rain_prob']>=61 else "⛅" if day['rain_prob']>=30 else "☀️"}</div>
+                    <div style="font-size:16px;font-weight:700;color:#00b4d8;">{round(day['temp_max'])}°C</div>
+                    <div style="font-size:11px;color:rgba(255,255,255,0.35);">Low {round(day['temp_min'])}°C</div>
+                    <div style="font-size:12px;color:{rain_color};margin-top:6px;font-weight:600;">💧 {day['rain_prob']}%</div>
+                    <div style="font-size:10px;color:rgba(255,255,255,0.3);margin-top:4px;">{day['condition'][:18]}</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+    st.markdown("""
+    <div class="stats-bar">
+        <div class="stat-item">Trained On <span>142,193 Records</span></div>
+        <div class="stat-item">Rain Classifier Accuracy <span>85.00%</span></div>
+        <div class="stat-item">AUC Score <span>0.9305</span></div>
+        <div class="stat-item">Temp Regressor R² <span>0.8913</span></div>
+        <div class="stat-item">Optimized Threshold <span>0.61</span></div>
+        <div class="stat-item">Dataset <span>weatherAUS.csv</span></div>
+    </div>
+    """, unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+# ================================================================
+# PAGE 2 — PREDICT
+# ================================================================
+
+def page_predict():
+    st.markdown('<div class="page-wrap">', unsafe_allow_html=True)
+    st.markdown('<div class="sec-title">🔮 Weather Prediction Engine</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sec-sub">Adjust inputs and run XGBoost prediction for rain probability and temperature forecast</div>', unsafe_allow_html=True)
+
+    prefill  = st.session_state.get("prefill", {})
+    col_in, col_out = st.columns([1.1,1])
+
+    with col_in:
+        st.markdown('<div class="w-card">', unsafe_allow_html=True)
+        st.markdown('<div style="font-size:13px;font-weight:600;color:#00b4d8;margin-bottom:1rem;">Weather Input Parameters</div>', unsafe_allow_html=True)
+        ic1, ic2 = st.columns(2)
+        with ic1:
+            h3pm     = st.slider("💧 Humidity 3pm (%)",   0,   100, int(prefill.get("humidity3pm",55)))
+            rainfall = st.slider("🌧️ Rainfall (mm)",       0.0, 100.0, 0.0, 0.5)
+            cloud3pm = st.slider("☁️ Cloud Cover 3pm",    0,   8,   4)
+            h9am     = st.slider("💧 Humidity 9am (%)",   0,   100, 70)
+            month    = st.selectbox("📅 Month", list(range(1,13)),
+                                    format_func=lambda x: datetime(2024,x,1).strftime("%B"), index=5)
+        with ic2:
+            max_temp  = st.number_input("🌡️ Max Temp (°C)",        -10.0, 55.0,  float(prefill.get("max_temp",25.0)), 0.5)
+            wind_gust = st.number_input("💨 Wind Gust (km/h)",       0.0,  250.0, float(prefill.get("wind_gust_speed",40.0)), 1.0)
+            p3pm      = st.number_input("🔵 Pressure 3pm (hPa)",   970.0, 1050.0,float(prefill.get("pressure3pm",1015.0)), 0.5)
+            sunshine  = st.slider("☀️ Sunshine (hrs)",  0.0, 14.0, 7.0, 0.5)
+            evap      = st.slider("💦 Evaporation (mm)",0.0, 20.0, 4.5, 0.5)
+
+        # Derived metrics
+        dew_pt = calc_dew_point(max_temp, h3pm)
+        hi_val = calc_heat_index(max_temp, h3pm)
+        st.markdown(f"""
+        <div style="display:flex;gap:10px;margin-top:0.8rem;flex-wrap:wrap;">
+            <div style="background:rgba(0,180,216,0.06);border-radius:8px;padding:6px 14px;font-size:12px;color:rgba(255,255,255,0.65);">
+                💦 Dew Point: <span style="color:#00b4d8;font-weight:600;">{dew_pt}°C</span>
+            </div>
+            <div style="background:rgba(245,158,11,0.06);border-radius:8px;padding:6px 14px;font-size:12px;color:rgba(255,255,255,0.65);">
+                🥵 Heat Index: <span style="color:#f59e0b;font-weight:600;">{hi_val}°C</span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # Heat stress warning
+        heat_stress = max_temp > 35 and h3pm > 60
+        if heat_stress:
+            st.markdown('<div style="background:rgba(255,68,68,0.1);border-left:2px solid #ff4444;border-radius:6px;padding:8px 12px;font-size:11px;color:#ff4444;margin-top:6px;">🚨 Heat Stress Risk — High temp + high humidity combination is dangerous for outdoor workers</div>', unsafe_allow_html=True)
+
+        # Smart input warnings
+        warnings = []
+        if h3pm > 85:       warnings.append("⚠️ Humidity 3pm is very high — strong rain signal")
+        if max_temp > 42:   warnings.append("⚠️ Temperature is extreme — heat alert possible")
+        if wind_gust > 110: warnings.append("⚠️ Wind gust is very high — storm conditions")
+        if rainfall > 50:   warnings.append("⚠️ Rainfall is very high — flood risk possible")
+        for w in warnings:
+            st.markdown(f'<div style="background:rgba(245,158,11,0.1);border-left:2px solid #f59e0b;border-radius:6px;padding:6px 12px;font-size:11px;color:#f59e0b;margin-bottom:4px;">{w}</div>', unsafe_allow_html=True)
+
+        st.markdown('<div class="action-btn" style="margin-top:1rem;">', unsafe_allow_html=True)
+        run = st.button("⚡ Run Prediction", key="run_pred", use_container_width=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with col_out:
+        if run:
+            with st.spinner("Running XGBoost model..."):
+                inp = build_input_dict(h3pm,sunshine,rainfall,wind_gust,cloud3pm,p3pm,h9am,max_temp,evap,month)
+                try:
+                    result    = get_ml_prediction(inp)
+                    rain_prob = result["rain_prob"]
+                    rain_pred = result["rain_pred"]
+                    temp_pred = result["temp_pred"]
+
+                    st.session_state.last_result = result
+                    st.session_state.last_inputs = {
+                        "h3pm":h3pm,"sunshine":sunshine,"rainfall":rainfall,
+                        "wind_gust":wind_gust,"cloud3pm":cloud3pm,"p3pm":p3pm,
+                        "h9am":h9am,"max_temp":max_temp,"evap":evap,"month":month
+                    }
+                    st.session_state.report_prefill = {
+                        "rain":   rain_prob,
+                        "temp":   max_temp,
+                        "wind":   wind_gust,
+                        "humid":  h3pm
+                    }
+                    st.session_state.prediction_history.insert(0, {
+                        "time":      datetime.now().strftime("%H:%M:%S"),
+                        "rain_prob": rain_prob,
+                        "rain_pred": rain_pred,
+                        "temp":      temp_pred,
+                        "month":     datetime(2024,month,1).strftime("%b"),
+                        "max_temp":  max_temp,
+                        "humidity":  h3pm
+                    })
+                    if len(st.session_state.prediction_history) > 10:
+                        st.session_state.prediction_history.pop()
+
+                    prob_color = "#22c55e" if rain_prob < 40 else "#f59e0b" if rain_prob < 61 else "#ff4444"
+                    r,g,b      = int(prob_color[1:3],16),int(prob_color[3:5],16),int(prob_color[5:7],16)
+
+                    st.markdown('<div class="w-card">', unsafe_allow_html=True)
+
+                    # Toast notification
+                    st.markdown(f'<div class="toast">✅ Prediction Complete — Rain: {rain_pred} ({rain_prob}%)</div>', unsafe_allow_html=True)
+
+                    # Radar chart
+                    fig_radar = go.Figure(go.Scatterpolar(
+                        r=[rain_prob,100-rain_prob,rain_prob],
+                        theta=["Rain Prob","Clear Sky","Rain Prob"],
+                        fill='toself', fillcolor=f"rgba({r},{g},{b},0.2)",
+                        line=dict(color=prob_color,width=2)
+                    ))
+                    fig_radar.update_layout(
+                        polar=dict(
+                            radialaxis=dict(visible=True,range=[0,100],
+                                           tickfont=dict(color='rgba(255,255,255,0.3)',size=9),
+                                           gridcolor='rgba(255,255,255,0.06)'),
+                            angularaxis=dict(tickfont=dict(color='rgba(255,255,255,0.5)',size=10),
+                                            gridcolor='rgba(255,255,255,0.06)'),
+                            bgcolor='rgba(17,31,48,0.6)'
+                        ),
+                        paper_bgcolor='rgba(0,0,0,0)', margin=dict(t=20,b=20,l=20,r=20), height=200
+                    )
+                    st.plotly_chart(fig_radar, use_container_width=True, config={"displayModeBar":False})
+
+                    badge_cls = "badge-yes" if rain_pred=="Yes" else "badge-no"
+                    st.markdown(f"""
+                    <div style="text-align:center;margin-bottom:1rem;">
+                        <div style="font-size:42px;font-weight:800;color:{prob_color};text-shadow:0 0 20px {prob_color}88;">{rain_prob}%</div>
+                        <div style="font-size:12px;color:rgba(255,255,255,0.4);margin-bottom:6px;">Rain Probability</div>
+                        <span class="{badge_cls}">Rain: {rain_pred}</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                    # Confidence gauge
+                    confidence = rain_prob if rain_pred=="Yes" else 100-rain_prob
+                    fig_gauge  = go.Figure(go.Indicator(
+                        mode="gauge+number", value=confidence,
+                        title={"text":"Model Confidence","font":{"color":"rgba(255,255,255,0.5)","size":12}},
+                        number={"suffix":"%","font":{"color":"#00b4d8","size":22}},
+                        gauge={"axis":{"range":[0,100],"tickcolor":"rgba(255,255,255,0.2)"},
+                               "bar":{"color":"#00b4d8"},"bgcolor":"rgba(17,31,48,0.8)",
+                               "bordercolor":"rgba(0,180,216,0.2)",
+                               "steps":[{"range":[0,40],"color":"rgba(34,197,94,0.1)"},
+                                        {"range":[40,70],"color":"rgba(245,158,11,0.1)"},
+                                        {"range":[70,100],"color":"rgba(255,68,68,0.1)"}]}
+                    ))
+                    fig_gauge.update_layout(paper_bgcolor='rgba(0,0,0,0)',font={"color":"white"},
+                                            margin=dict(t=30,b=10,l=20,r=20),height=180)
+                    st.plotly_chart(fig_gauge, use_container_width=True, config={"displayModeBar":False})
+
+                    # Temperature + season
+                    st.markdown(f"""
+                    <div style="background:rgba(0,180,216,0.08);border:1px solid rgba(0,180,216,0.2);border-radius:12px;padding:14px;text-align:center;margin-top:0.5rem;">
+                        <div style="font-size:13px;color:rgba(255,255,255,0.4);">Predicted Max Temperature</div>
+                        <div style="font-size:36px;font-weight:800;color:#00b4d8;">{temp_pred}°C</div>
+                        <div style="font-size:12px;color:rgba(255,255,255,0.35);">Season: {get_season_label(month)} &nbsp;|&nbsp; Threshold: 0.61</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                    # Explanation
+                    reasons = explain_prediction(rain_prob,h3pm,sunshine,rainfall,wind_gust,cloud3pm)
+                    st.markdown('<div style="margin-top:1rem;font-size:12px;color:rgba(255,255,255,0.4);margin-bottom:6px;">Why this prediction?</div>', unsafe_allow_html=True)
+                    for r_txt in reasons:
+                        st.markdown(f'<div class="reason-item">💡 {r_txt}</div>', unsafe_allow_html=True)
+
+                    # Copy result text
+                    copy_text = f"WeatherAI Prediction | Rain: {rain_pred} ({rain_prob}%) | Temp: {temp_pred}°C | Month: {datetime(2024,month,1).strftime('%b')} | Threshold: 0.61"
+                    st.text_area("📋 Copy Result", value=copy_text, height=60, key="copy_result", label_visibility="visible")
+
+                    # Feature importance
+                    st.markdown('<div style="margin-top:0.8rem;font-size:12px;color:rgba(255,255,255,0.4);margin-bottom:4px;">Top Features — Rain Classifier</div>', unsafe_allow_html=True)
+                    features   = ["Humidity3pm","Sunshine","Rainfall","WindGustSpeed","Cloud3pm"]
+                    importance = [0.2815,0.1057,0.0728,0.0653,0.0591]
+                    fig_imp = go.Figure(go.Bar(
+                        x=importance, y=features, orientation='h',
+                        marker=dict(color=['#00b4d8','#0096b4','#007a94','#005e74','#004254'],line=dict(width=0)),
+                        text=[f"{v:.4f}" for v in importance],
+                        textfont=dict(color='white',size=10), textposition='outside'
+                    ))
+                    fig_imp.update_layout(
+                        paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+                        xaxis=dict(showgrid=False,showticklabels=False,color='white'),
+                        yaxis=dict(tickfont=dict(color='rgba(255,255,255,0.7)',size=11)),
+                        margin=dict(t=10,b=10,l=10,r=50), height=180
+                    )
+                    st.plotly_chart(fig_imp, use_container_width=True, config={"displayModeBar":False})
+
+                    # Send to Report button
+                    st.markdown('<div class="action-btn" style="margin-top:0.8rem;">', unsafe_allow_html=True)
+                    if st.button("📄 Send to Report Page", key="send_report", use_container_width=True):
+                        st.session_state.page = "Report"
+                        st.rerun()
+                    st.markdown('</div>', unsafe_allow_html=True)
+
+                    st.markdown('</div>', unsafe_allow_html=True)
+
+                except Exception as e:
+                    st.error(f"Prediction error: {e}")
+
+        if st.session_state.prediction_history:
+            st.markdown('<div style="margin-top:1rem;font-size:13px;color:rgba(255,255,255,0.5);margin-bottom:8px;">Recent Predictions</div>', unsafe_allow_html=True)
+            for h in st.session_state.prediction_history[:5]:
+                color = "#ff4444" if h["rain_pred"]=="Yes" else "#22c55e"
+                st.markdown(f"""
+                <div class="hist-card">
+                    <span style="color:{color};font-weight:600;">{h['rain_pred']}</span>
+                    &nbsp;|&nbsp; {h['rain_prob']}% rain &nbsp;|&nbsp; {h['temp']}°C &nbsp;|&nbsp; {h['month']}
+                    <span style="float:right;color:rgba(255,255,255,0.3);">{h['time']}</span>
+                </div>
+                """, unsafe_allow_html=True)
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+# ================================================================
+# PAGE 3 — RECOMMEND
+# ================================================================
+
+def page_recommend():
+    st.markdown('<div class="page-wrap">', unsafe_allow_html=True)
+    st.markdown('<div class="sec-title">💡 Industry Recommendations</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sec-sub">Select your industry for focused advice, Go/No-Go verdict, task planner and safety checklist. Now includes Healthcare, Sports/Events and Marine/Fishing.</div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="w-card">', unsafe_allow_html=True)
+    ic1, ic2 = st.columns([1.5,2.5])
+    with ic1:
+        selected_industry = st.selectbox("🏭 Select Your Industry",
+                                         ["All Industries"] + list(ICONS.keys()), key="sel_industry")
+    rc1,rc2,rc3,rc4 = st.columns(4)
+    with rc1: r_rain = st.slider("🌧️ Rain Probability (%)", 0, 100, 40)
+    with rc2: r_temp = st.slider("🌡️ Max Temp (°C)",       -10, 55, 28)
+    with rc3: r_wind = st.slider("💨 Wind Speed (km/h)",    0, 200, 40)
+    with rc4: r_hum  = st.slider("💧 Humidity (%)",         0, 100, 60)
+    st.markdown('<div class="action-btn" style="margin-top:0.8rem;">', unsafe_allow_html=True)
+    get_rec = st.button("💡 Get Recommendations", key="get_rec", use_container_width=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    if get_rec:
+        recs      = get_recommendations(r_rain, r_temp, r_wind, r_hum)
+        danger_c  = sum(1 for v in recs.values() if sev_label(v)=="DANGER")
+        caution_c = sum(1 for v in recs.values() if sev_label(v)=="CAUTION")
+        safe_c    = sum(1 for v in recs.values() if sev_label(v)=="SAFE")
+
+        # Severity filter
+        filt_col1, filt_col2, filt_col3, filt_col4 = st.columns([1,1,1,3])
+        sev_filter = "ALL"
+        with filt_col1:
+            st.markdown('<div class="filter-btn">', unsafe_allow_html=True)
+            if st.button(f"🔴 Danger ({danger_c})",  key="f_danger"):  sev_filter="DANGER"
+            st.markdown('</div>', unsafe_allow_html=True)
+        with filt_col2:
+            st.markdown('<div class="filter-btn">', unsafe_allow_html=True)
+            if st.button(f"🟡 Caution ({caution_c})",key="f_caution"): sev_filter="CAUTION"
+            st.markdown('</div>', unsafe_allow_html=True)
+        with filt_col3:
+            st.markdown('<div class="filter-btn">', unsafe_allow_html=True)
+            if st.button(f"🟢 Safe ({safe_c})",      key="f_safe"):    sev_filter="SAFE"
+            st.markdown('</div>', unsafe_allow_html=True)
+
+        st.markdown(f"""
+        <div style="display:flex;gap:1rem;margin:1rem 0;flex-wrap:wrap;align-items:center;">
+            <div style="font-size:13px;color:rgba(255,255,255,0.4);">Overall Severity:</div>
+            <div style="background:rgba(255,68,68,0.08);border:1px solid rgba(255,68,68,0.25);border-radius:10px;padding:10px 20px;text-align:center;min-width:100px;">
+                <div style="font-size:24px;font-weight:700;color:#ff4444;">{danger_c}</div>
+                <div style="font-size:11px;color:rgba(255,255,255,0.4);">DANGER</div>
+            </div>
+            <div style="background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.25);border-radius:10px;padding:10px 20px;text-align:center;min-width:100px;">
+                <div style="font-size:24px;font-weight:700;color:#f59e0b;">{caution_c}</div>
+                <div style="font-size:11px;color:rgba(255,255,255,0.4);">CAUTION</div>
+            </div>
+            <div style="background:rgba(34,197,94,0.08);border:1px solid rgba(34,197,94,0.25);border-radius:10px;padding:10px 20px;text-align:center;min-width:100px;">
+                <div style="font-size:24px;font-weight:700;color:#22c55e;">{safe_c}</div>
+                <div style="font-size:11px;color:rgba(255,255,255,0.4);">SAFE</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        if selected_industry != "All Industries":
+            ind  = selected_industry
+            text = recs.get(ind, "Safe for normal operations.")
+            verdict, v_color, v_icon = get_gonogo(text)
+            hours   = get_hour_windows(ind, r_rain, r_temp, r_wind)
+            details = INDUSTRY_DETAILS.get(ind, {})
+
+            g1, g2 = st.columns([1,2])
+            with g1:
+                cls_map  = {"GO":"gonogo-go","CAUTION":"gonogo-caution","NO-GO":"gonogo-nogo"}
+                st.markdown(f"""
+                <div class="{cls_map[verdict]}" style="margin-bottom:1rem;">
+                    <div style="font-size:40px;">{v_icon}</div>
+                    <div style="font-size:24px;font-weight:800;color:{v_color};margin-top:8px;">{verdict}</div>
+                    <div style="font-size:12px;color:rgba(255,255,255,0.5);margin-top:6px;">{ICONS[ind]} {ind}</div>
+                    <div style="font-size:12px;color:rgba(255,255,255,0.65);margin-top:10px;line-height:1.5;">{text}</div>
+                </div>
+                """, unsafe_allow_html=True)
+                st.markdown('<div style="font-size:12px;color:rgba(255,255,255,0.4);margin-bottom:6px;">Sensitive to</div>', unsafe_allow_html=True)
+                for factor in details.get("sensitive_to",[]):
+                    st.markdown(f'<span style="background:rgba(0,180,216,0.06);border-radius:6px;padding:4px 10px;font-size:11px;color:rgba(255,255,255,0.6);display:inline-block;margin-right:4px;margin-bottom:4px;">📌 {factor}</span>', unsafe_allow_html=True)
+            with g2:
+                st.markdown('<div style="font-size:13px;color:rgba(255,255,255,0.5);margin-bottom:8px;">⏰ Hour-by-Hour Task Planner</div>', unsafe_allow_html=True)
+                for hw in hours:
+                    risk_icon = "✅" if hw['risk']=="safe" else "⚠️" if hw['risk']=="moderate" else "🚫"
+                    st.markdown(f'<div class="hour-{hw["risk"]}"><span style="color:rgba(255,255,255,0.8);font-weight:600;">{risk_icon} {hw["start"]:02d}:00 – {hw["end"]:02d}:00</span><span style="color:rgba(255,255,255,0.5);margin-left:8px;">{hw["desc"]}</span></div>', unsafe_allow_html=True)
+                st.markdown('<div style="font-size:13px;color:rgba(255,255,255,0.5);margin:1rem 0 8px;">📋 Safety Checklist</div>', unsafe_allow_html=True)
+                for item in details.get("checklist",[]):
+                    st.markdown(f'<div class="checklist-item">☐ {item}</div>', unsafe_allow_html=True)
+                st.markdown('<div style="font-size:13px;color:rgba(255,255,255,0.5);margin:1rem 0 8px;">🔧 Key Tasks for Today</div>', unsafe_allow_html=True)
+                task_cols = st.columns(len(details.get("tasks",[])))
+                for tc, task in zip(task_cols, details.get("tasks",[])):
+                    with tc:
+                        task_ok  = verdict != "NO-GO"
+                        tc_color = "#22c55e" if task_ok else "#ff4444"
+                        tc_bg    = "rgba(34,197,94,0.08)" if task_ok else "rgba(255,68,68,0.08)"
+                        st.markdown(f'<div style="background:{tc_bg};border-radius:8px;padding:8px;text-align:center;font-size:11px;color:{tc_color};">{"✅" if task_ok else "🚫"}<br>{task}</div>', unsafe_allow_html=True)
+        else:
+            for i in range(0, len(list(recs.keys())), 2):
+                industries_page = list(recs.keys())
+                cols = st.columns(2)
+                for j, col in enumerate(cols):
+                    if i+j < len(industries_page):
+                        ind  = industries_page[i+j]
+                        text = recs[ind]
+                        sev  = sev_label(text)
+                        cls  = card_class(text)
+                        verdict, v_color, v_icon = get_gonogo(text)
+                        sev_html = f'<span class="sev-{sev.lower()}">{sev}</span>'
+                        with col:
+                            st.markdown(f"""
+                            <div class="{cls}" style="margin-bottom:12px;">
+                                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                                    <div style="font-size:15px;font-weight:600;">{ICONS.get(ind,"🏭")} {ind}</div>
+                                    <div style="display:flex;gap:6px;align-items:center;">{sev_html}
+                                        <span style="color:{v_color};font-size:13px;font-weight:700;">{v_icon} {verdict}</span>
+                                    </div>
+                                </div>
+                                <div style="font-size:13px;color:rgba(255,255,255,0.7);line-height:1.5;">{text}</div>
+                            </div>
+                            """, unsafe_allow_html=True)
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+# ================================================================
+# PAGE 4 — ALERTS
+# ================================================================
+
+def page_alerts():
+    st.markdown('<div class="page-wrap">', unsafe_allow_html=True)
+    st.markdown('<div class="sec-title">🚨 Weather Alert System</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sec-sub">Assess risk level, view active alerts, safety tips and emergency contacts</div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="w-card">', unsafe_allow_html=True)
+    ac1,ac2,ac3,ac4 = st.columns(4)
+    with ac1: a_rain = st.slider("🌧️ Rain Probability (%)", 0, 100, 40, key="a_rain")
+    with ac2: a_temp = st.slider("🌡️ Max Temp (°C)",       -10, 55, 28, key="a_temp")
+    with ac3: a_wind = st.slider("💨 Wind Speed (km/h)",    0, 200, 40, key="a_wind")
+    with ac4: a_rf   = st.slider("🌧️ Rainfall (mm)",        0, 150,  5, key="a_rf")
+    st.markdown('<div class="action-btn" style="margin-top:0.8rem;">', unsafe_allow_html=True)
+    get_alert_btn = st.button("🚨 Analyse Risk", key="get_alert", use_container_width=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    if get_alert_btn:
+        level, alerts = get_alert_level(a_rain, a_temp, a_wind, a_rf)
+        st.session_state.alert_history.insert(0,{
+            "time":  datetime.now().strftime("%H:%M:%S"),
+            "level": level, "alerts": alerts,
+            "rain":  a_rain, "temp": a_temp, "wind": a_wind
+        })
+        if len(st.session_state.alert_history) > 5:
+            st.session_state.alert_history.pop()
+
+        if level == "High":
+            st.markdown('<div class="red-pulse-border"></div>', unsafe_allow_html=True)
+            st.markdown('<div class="high-risk-banner">🚨 HIGH RISK CONDITIONS DETECTED — Take Immediate Precautions 🚨</div>', unsafe_allow_html=True)
+
+        gauge_val   = {"Low":20,"Medium":60,"High":90}[level]
+        gauge_color = {"Low":"#22c55e","Medium":"#f59e0b","High":"#ff4444"}[level]
+        fig_arc = go.Figure(go.Indicator(
+            mode="gauge+number+delta", value=gauge_val,
+            title={"text":"RISK LEVEL","font":{"color":"rgba(255,255,255,0.5)","size":13}},
+            number={"font":{"color":gauge_color,"size":1},"suffix":""},
+            gauge={"axis":{"range":[0,100],"tickvals":[0,33,66,100],
+                           "ticktext":["","LOW","MEDIUM","HIGH"],
+                           "tickcolor":"rgba(255,255,255,0.3)",
+                           "tickfont":{"color":"rgba(255,255,255,0.4)","size":11}},
+                   "bar":{"color":gauge_color,"thickness":0.25},
+                   "bgcolor":"rgba(17,31,48,0.8)","bordercolor":"rgba(255,255,255,0.05)",
+                   "steps":[{"range":[0,33],"color":"rgba(34,197,94,0.1)"},
+                             {"range":[33,66],"color":"rgba(245,158,11,0.1)"},
+                             {"range":[66,100],"color":"rgba(255,68,68,0.1)"}],
+                   "threshold":{"line":{"color":gauge_color,"width":3},"value":gauge_val}}
+        ))
+        fig_arc.update_layout(paper_bgcolor='rgba(0,0,0,0)',font={"color":"white"},
+                              margin=dict(t=40,b=10,l=40,r=40),height=240)
+
+        ga_col, al_col = st.columns([1,1.2])
+        with ga_col:
+            st.plotly_chart(fig_arc, use_container_width=True, config={"displayModeBar":False})
+            active_count = len([a for a in alerts if a!="No active weather alerts"])
+            st.markdown(f"""
+            <div style="text-align:center;margin-top:0.5rem;">
+                <span class="badge-{level.lower()}">Risk Level: {level.upper()}</span>
+                <div style="font-size:12px;color:rgba(255,255,255,0.35);margin-top:8px;">{active_count} Active Alert(s)</div>
+            </div>
+            """, unsafe_allow_html=True)
+            alert_text = f"WeatherAI Alert | Risk: {level} | Rain: {a_rain}% | Temp: {a_temp}C | Wind: {a_wind}km/h | {', '.join(alerts)}"
+            st.markdown('<div style="margin-top:1rem;font-size:11px;color:rgba(255,255,255,0.35);">Shareable Alert Text</div>', unsafe_allow_html=True)
+            st.text_area("", value=alert_text, height=80, key="share_txt", label_visibility="collapsed")
+
+        with al_col:
+            st.markdown('<div style="font-size:13px;color:rgba(255,255,255,0.5);margin-bottom:10px;margin-top:1rem;">Active Alerts</div>', unsafe_allow_html=True)
+            for alert in alerts:
+                if alert == "No active weather alerts":
+                    st.markdown(f'<div style="background:rgba(34,197,94,0.08);border-left:3px solid #22c55e;border-radius:8px;padding:10px 16px;font-size:13px;color:rgba(255,255,255,0.75);">✅ {alert}</div>', unsafe_allow_html=True)
+                else:
+                    st.markdown(f'<div class="alert-item">⚠️ {alert}</div>', unsafe_allow_html=True)
+
+            tips = {
+                "Low":    ["Normal operations. No special precautions needed.",
+                           "Stay updated with latest weather forecasts."],
+                "Medium": ["Carry rain gear if going outdoors.",
+                           "Avoid unnecessary outdoor work during peak hours.",
+                           "Keep emergency contacts handy."],
+                "High":   ["Avoid all non-essential outdoor activities.",
+                           "Secure outdoor objects that could be blown away.",
+                           "Stay indoors and monitor official weather alerts.",
+                           "Keep emergency kit ready."]
+            }
+            st.markdown('<div style="margin-top:1rem;font-size:13px;color:rgba(255,255,255,0.5);margin-bottom:8px;">Safety Tips</div>', unsafe_allow_html=True)
+            for tip in tips[level]:
+                st.markdown(f'<div style="background:rgba(0,180,216,0.05);border-radius:8px;padding:8px 14px;font-size:12px;color:rgba(255,255,255,0.6);margin-bottom:6px;border-left:2px solid rgba(0,180,216,0.3);">-> {tip}</div>', unsafe_allow_html=True)
+
+            st.markdown('<div style="margin-top:1rem;font-size:13px;color:rgba(255,255,255,0.5);margin-bottom:8px;">📞 Emergency Contacts</div>', unsafe_allow_html=True)
+            for region, contacts in EMERGENCY_CONTACTS.items():
+                st.markdown(f'<div style="font-size:11px;color:#00b4d8;margin-bottom:4px;">{region}</div>', unsafe_allow_html=True)
+                for name, num in contacts.items():
+                    st.markdown(f'<div class="contact-card">📞 {name}: <span style="color:#00b4d8;font-weight:600;">{num}</span></div>', unsafe_allow_html=True)
+
+    if st.session_state.alert_history:
+        st.markdown('<div style="margin-top:1.5rem;font-size:13px;color:rgba(255,255,255,0.5);margin-bottom:8px;">🕐 Alert History (Last 5)</div>', unsafe_allow_html=True)
+        for ah in st.session_state.alert_history:
+            lc = {"Low":"#22c55e","Medium":"#f59e0b","High":"#ff4444"}[ah["level"]]
+            st.markdown(f"""
+            <div class="hist-card">
+                <span style="color:{lc};font-weight:600;">{ah['level']}</span>
+                &nbsp;|&nbsp; Rain: {ah['rain']}% &nbsp;|&nbsp; Temp: {ah['temp']}°C &nbsp;|&nbsp; Wind: {ah['wind']} km/h
+                <span style="float:right;color:rgba(255,255,255,0.3);">{ah['time']}</span>
+            </div>
+            """, unsafe_allow_html=True)
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+# ================================================================
+# PAGE 5 — REPORT
+# ================================================================
+
+def page_report():
+    st.markdown('<div class="page-wrap">', unsafe_allow_html=True)
+    st.markdown('<div class="sec-title">📄 Weather Intelligence Report</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sec-sub">Generate a full weather + ML prediction + industry-specific report. Auto-fills from Predict page if you used Send to Report.</div>', unsafe_allow_html=True)
+
+    rp_fill = st.session_state.get("report_prefill", {})
+
+    st.markdown('<div class="w-card">', unsafe_allow_html=True)
+    rp1,rp2,rp3 = st.columns(3)
+    with rp1: rpt_city     = st.text_input("🏙️ City Name", value="Sydney", key="rpt_city")
+    with rp2: rpt_industry = st.selectbox("🏭 Industry", list(ICONS.keys()), key="rpt_ind")
+    with rp3: rpt_rain     = st.slider("🌧️ Rain Probability (%)", 0, 100, int(rp_fill.get("rain",40)), key="rpt_rain")
+    rp4,rp5,rp6 = st.columns(3)
+    with rp4: rpt_temp = st.slider("🌡️ Max Temp (°C)",    -10, 55,  int(rp_fill.get("temp",28)),  key="rpt_temp")
+    with rp5: rpt_wind = st.slider("💨 Wind Speed (km/h)", 0,  200, int(rp_fill.get("wind",40)),  key="rpt_wind")
+    with rp6: rpt_hum  = st.slider("💧 Humidity (%)",      0,  100, int(rp_fill.get("humid",60)), key="rpt_hum")
+    st.markdown('<div class="action-btn" style="margin-top:0.8rem;">', unsafe_allow_html=True)
+    gen_report = st.button("📄 Generate Report", key="gen_report", use_container_width=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    if gen_report:
+        with st.spinner("Fetching weather and generating report..."):
+            weather_data  = fetch_weather(rpt_city)
+            recs          = get_recommendations(rpt_rain, rpt_temp, rpt_wind, rpt_hum)
+            level, alerts = get_alert_level(rpt_rain, rpt_temp, rpt_wind, 0)
+            result        = st.session_state.get("last_result")
+            report_text   = generate_report_text(
+                rpt_city, weather_data or {}, result, recs,
+                level, alerts, rpt_industry, rpt_rain, rpt_temp, rpt_wind
+            )
+        now = datetime.now()
+        rc1, rc2 = st.columns([1.5,1])
+        with rc1:
+            st.markdown('<div style="font-size:13px;color:rgba(255,255,255,0.5);margin-bottom:8px;margin-top:1rem;">Report Preview</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="report-box">{report_text}</div>', unsafe_allow_html=True)
+            st.download_button(
+                label="⬇️ Download Report (.txt)",
+                data=report_text.encode("utf-8"),
+                file_name=f"WeatherAI_{rpt_industry}_Report_{rpt_city}_{now.strftime('%Y%m%d_%H%M')}.txt",
+                mime="text/plain"
+            )
+        with rc2:
+            if weather_data:
+                st.markdown('<div class="w-card" style="margin-top:1rem;">', unsafe_allow_html=True)
+                st.markdown(f'<div style="font-size:16px;font-weight:700;">{weather_data["city"]}, {weather_data["country"]}</div>', unsafe_allow_html=True)
+                st.markdown(f'<div style="font-size:12px;color:rgba(255,255,255,0.4);">{weather_data["condition"]}</div>', unsafe_allow_html=True)
+                st.markdown('<hr class="divider">', unsafe_allow_html=True)
+                for icon, val, lbl in [
+                    ("🌡️",f"{weather_data['temp']}°C","Temperature"),
+                    ("💧",f"{weather_data['humidity']}%","Humidity"),
+                    ("💨",f"{weather_data['wind_speed']} km/h","Wind"),
+                    ("🌅",weather_data.get("sunrise","N/A"),"Sunrise"),
+                    ("🌇",weather_data.get("sunset","N/A"),"Sunset"),
+                ]:
+                    st.markdown(f'<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.05);font-size:13px;"><span>{icon} {lbl}</span><span style="color:#00b4d8;font-weight:600;">{val}</span></div>', unsafe_allow_html=True)
+                st.markdown('</div>', unsafe_allow_html=True)
+            level_color = {"Low":"#22c55e","Medium":"#f59e0b","High":"#ff4444"}[level]
+            st.markdown(f"""
+            <div class="w-card" style="margin-top:1rem;text-align:center;">
+                <div style="font-size:12px;color:rgba(255,255,255,0.4);">Overall Risk for {rpt_industry}</div>
+                <div style="font-size:28px;font-weight:800;color:{level_color};margin:8px 0;">{level.upper()}</div>
+                <div style="font-size:12px;color:rgba(255,255,255,0.4);">{recs.get(rpt_industry,'')}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+# ================================================================
+# PAGE 6 — INSIGHTS
+# ================================================================
+
+def page_insights():
+    st.markdown('<div class="page-wrap">', unsafe_allow_html=True)
+    st.markdown('<div class="sec-title">📊 Model Insights & Performance</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sec-sub">Visual overview of model training, performance metrics, confusion matrix, feature importance and dataset statistics</div>', unsafe_allow_html=True)
+
+    k1,k2,k3,k4,k5 = st.columns(5)
+    kpis = [("🎯","85.00%","Classifier Accuracy"),("📈","0.9305","AUC Score"),
+            ("📉","0.8913","Regressor R²"),("🗂️","142,193","Training Records"),("⚖️","3.46:1","Class Imbalance")]
+    for col,(icon,val,lbl) in zip([k1,k2,k3,k4,k5],kpis):
+        with col: st.markdown(f'<div class="m-card"><div class="m-icon">{icon}</div><div class="m-val" style="font-size:18px;">{val}</div><div class="m-lbl">{lbl}</div></div>', unsafe_allow_html=True)
+
+    st.markdown('<div style="margin-top:1.5rem;"></div>', unsafe_allow_html=True)
+    row1c1, row1c2 = st.columns(2)
+    with row1c1:
+        st.markdown('<div class="insight-card">', unsafe_allow_html=True)
+        st.markdown('<div style="font-size:13px;color:rgba(255,255,255,0.5);margin-bottom:8px;">Feature Importance — Rain Classifier (Top 10)</div>', unsafe_allow_html=True)
+        feat_names = ["Humidity3pm","Sunshine","Rainfall","WindGustSpeed","Cloud3pm","Pressure3pm","Humidity9am","Evaporation","Cloud9am","Temp_Range"]
+        feat_vals  = [0.2815,0.1057,0.0728,0.0653,0.0591,0.0542,0.0489,0.0431,0.0398,0.0312]
+        fig_imp = go.Figure(go.Bar(x=feat_vals,y=feat_names,orientation='h',
+            marker=dict(color=['#00b4d8','#0096b4','#007a94','#005e74','#004254','#003040','#00b4d8','#0096b4','#007a94','#005e74'],line=dict(width=0)),
+            text=[f"{v:.4f}" for v in feat_vals],textfont=dict(color='white',size=10),textposition='outside'))
+        fig_imp.update_layout(paper_bgcolor='rgba(0,0,0,0)',plot_bgcolor='rgba(0,0,0,0)',
+            xaxis=dict(showgrid=False,showticklabels=False),
+            yaxis=dict(tickfont=dict(color='rgba(255,255,255,0.7)',size=11)),
+            margin=dict(t=10,b=10,l=10,r=60),height=300)
+        st.plotly_chart(fig_imp, use_container_width=True, config={"displayModeBar":False})
+        st.markdown('</div>', unsafe_allow_html=True)
+    with row1c2:
+        st.markdown('<div class="insight-card">', unsafe_allow_html=True)
+        st.markdown('<div style="font-size:13px;color:rgba(255,255,255,0.5);margin-bottom:8px;">Class Distribution — RainTomorrow</div>', unsafe_allow_html=True)
+        fig_cls = go.Figure(go.Pie(labels=["No Rain (77.58%)","Rain (22.42%)"],values=[110316,31877],hole=0.6,
+            marker_colors=['#0077b6','#00b4d8'],textinfo='label+percent',textfont=dict(color='white',size=11)))
+        fig_cls.add_annotation(text="<b>142,193</b><br>Records",x=0.5,y=0.5,font=dict(size=14,color='white'),showarrow=False)
+        fig_cls.update_layout(paper_bgcolor='rgba(0,0,0,0)',showlegend=True,
+            legend=dict(font=dict(color='rgba(255,255,255,0.6)',size=11)),
+            margin=dict(t=10,b=10,l=10,r=10),height=300)
+        st.plotly_chart(fig_cls, use_container_width=True, config={"displayModeBar":False})
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    row2c1, row2c2 = st.columns(2)
+    with row2c1:
+        st.markdown('<div class="insight-card" style="margin-top:1rem;">', unsafe_allow_html=True)
+        st.markdown('<div style="font-size:13px;color:rgba(255,255,255,0.5);margin-bottom:8px;">Classifier Accuracy Comparison</div>', unsafe_allow_html=True)
+        models   = ["Logistic Reg","Decision Tree","LightGBM","XGBoost","Random Forest"]
+        acc      = [78.78,78.99,81.04,82.30,85.31]
+        fig_acc  = go.Figure(go.Bar(x=models,y=acc,
+            marker=dict(color=['#004254','#005e74','#007a94','#0096b4','#00b4d8'],line=dict(width=0)),
+            text=[f"{v}%" for v in acc],textfont=dict(color='white',size=11),textposition='outside'))
+        fig_acc.update_layout(paper_bgcolor='rgba(0,0,0,0)',plot_bgcolor='rgba(0,0,0,0)',
+            xaxis=dict(tickfont=dict(color='rgba(255,255,255,0.6)',size=10),showgrid=False),
+            yaxis=dict(range=[70,90],tickfont=dict(color='rgba(255,255,255,0.4)',size=10),gridcolor='rgba(255,255,255,0.05)'),
+            margin=dict(t=30,b=10,l=10,r=10),height=260)
+        st.plotly_chart(fig_acc, use_container_width=True, config={"displayModeBar":False})
+        st.markdown('</div>', unsafe_allow_html=True)
+    with row2c2:
+        st.markdown('<div class="insight-card" style="margin-top:1rem;">', unsafe_allow_html=True)
+        st.markdown('<div style="font-size:13px;color:rgba(255,255,255,0.5);margin-bottom:8px;">Regressor R² Comparison</div>', unsafe_allow_html=True)
+        reg_models = ["Linear Reg","LightGBM","Random Forest","XGBoost"]
+        r2_vals    = [0.5833,0.8733,0.8713,0.8913]
+        fig_r2 = go.Figure(go.Bar(x=reg_models,y=r2_vals,
+            marker=dict(color=['#004254','#005e74','#007a94','#00b4d8'],line=dict(width=0)),
+            text=[f"{v}" for v in r2_vals],textfont=dict(color='white',size=11),textposition='outside'))
+        fig_r2.update_layout(paper_bgcolor='rgba(0,0,0,0)',plot_bgcolor='rgba(0,0,0,0)',
+            xaxis=dict(tickfont=dict(color='rgba(255,255,255,0.6)',size=10),showgrid=False),
+            yaxis=dict(range=[0.4,1.0],tickfont=dict(color='rgba(255,255,255,0.4)',size=10),gridcolor='rgba(255,255,255,0.05)'),
+            margin=dict(t=30,b=10,l=10,r=10),height=260)
+        st.plotly_chart(fig_r2, use_container_width=True, config={"displayModeBar":False})
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    # Confusion matrix
+    st.markdown('<div style="margin-top:1rem;"></div>', unsafe_allow_html=True)
+    st.markdown('<div class="insight-card">', unsafe_allow_html=True)
+    st.markdown('<div style="font-size:13px;color:rgba(255,255,255,0.5);margin-bottom:12px;">Confusion Matrix — XGBoost Classifier (Test Set)</div>', unsafe_allow_html=True)
+    cm1,cm2,cm3 = st.columns([1,2,1])
+    with cm2:
+        fig_cm = go.Figure(go.Heatmap(
+            z=[[18725,3373],[957,5384]],
+            x=["Predicted: No Rain","Predicted: Rain"],
+            y=["Actual: No Rain","Actual: Rain"],
+            colorscale=[[0,'rgba(17,31,48,0.8)'],[1,'#00b4d8']],
+            text=[["TN: 18725","FP: 3373"],["FN: 957","TP: 5384"]],
+            texttemplate="%{text}", textfont=dict(color='white',size=14),
+            showscale=False
+        ))
+        fig_cm.update_layout(paper_bgcolor='rgba(0,0,0,0)',
+            xaxis=dict(tickfont=dict(color='rgba(255,255,255,0.7)',size=11)),
+            yaxis=dict(tickfont=dict(color='rgba(255,255,255,0.7)',size=11)),
+            margin=dict(t=10,b=10,l=10,r=10),height=240)
+        st.plotly_chart(fig_cm, use_container_width=True, config={"displayModeBar":False})
+
+    # Precision / Recall / F1 table
+    mc1,mc2,mc3,mc4 = st.columns(4)
+    metrics_data = [("Precision","0.6149","Rain class"),("Recall","0.8491","Rain class"),
+                    ("F1 Score","0.7139","Rain class"),("Specificity","0.8474","No-rain class")]
+    for col,(lbl,val,sub) in zip([mc1,mc2,mc3,mc4],metrics_data):
+        with col: st.markdown(f'<div style="background:rgba(0,180,216,0.05);border-radius:10px;padding:12px;text-align:center;margin-top:8px;"><div style="font-size:16px;font-weight:700;color:#00b4d8;">{val}</div><div style="font-size:11px;color:rgba(255,255,255,0.6);">{lbl}</div><div style="font-size:10px;color:rgba(255,255,255,0.3);">{sub}</div></div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # Preprocessing summary
+    st.markdown('<div style="margin-top:1rem;"></div>', unsafe_allow_html=True)
+    st.markdown('<div class="insight-card">', unsafe_allow_html=True)
+    st.markdown('<div style="font-size:13px;color:rgba(255,255,255,0.5);margin-bottom:12px;">Preprocessing & Feature Engineering Summary</div>', unsafe_allow_html=True)
+    prep_cols  = st.columns(4)
+    prep_items = [("🗑️","3,267","Null rows dropped"),("🔧","18","Numerical cols filled"),
+                  ("🏷️","8","Categorical cols encoded"),("📐","16","Cols Winsorized"),
+                  ("⚖️","16","Cols scaled"),("✨","4","Features engineered"),
+                  ("✅","0","Final null count"),("📦","29","Final columns")]
+    for i,(icon,val,lbl) in enumerate(prep_items):
+        with prep_cols[i%4]:
+            st.markdown(f'<div style="background:rgba(0,180,216,0.05);border-radius:10px;padding:12px;text-align:center;margin-bottom:8px;"><div style="font-size:20px;">{icon}</div><div style="font-size:18px;font-weight:700;color:#00b4d8;">{val}</div><div style="font-size:10px;color:rgba(255,255,255,0.4);">{lbl}</div></div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # Temp regressor features
+    st.markdown('<div style="margin-top:1rem;"></div>', unsafe_allow_html=True)
+    st.markdown('<div class="insight-card">', unsafe_allow_html=True)
+    st.markdown('<div style="font-size:13px;color:rgba(255,255,255,0.5);margin-bottom:8px;">Feature Importance — Temperature Regressor (Top 5)</div>', unsafe_allow_html=True)
+    temp_feats = ["Season","Humidity3pm","Evaporation","Sunshine","WindGustSpeed"]
+    temp_imp   = [0.44,0.12,0.11,0.09,0.07]
+    fig_ti = go.Figure(go.Bar(x=temp_feats,y=temp_imp,
+        marker=dict(color=['#00b4d8','#0096b4','#007a94','#005e74','#004254'],line=dict(width=0)),
+        text=[f"{v}" for v in temp_imp],textfont=dict(color='white',size=11),textposition='outside'))
+    fig_ti.update_layout(paper_bgcolor='rgba(0,0,0,0)',plot_bgcolor='rgba(0,0,0,0)',
+        xaxis=dict(tickfont=dict(color='rgba(255,255,255,0.7)',size=11),showgrid=False),
+        yaxis=dict(tickfont=dict(color='rgba(255,255,255,0.4)',size=10),gridcolor='rgba(255,255,255,0.05)'),
+        margin=dict(t=30,b=10,l=10,r=10),height=220)
+    st.plotly_chart(fig_ti, use_container_width=True, config={"displayModeBar":False})
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # Cross validation scores
+    st.markdown('<div style="margin-top:1rem;"></div>', unsafe_allow_html=True)
+    st.markdown('<div class="insight-card">', unsafe_allow_html=True)
+    st.markdown('<div style="font-size:13px;color:rgba(255,255,255,0.5);margin-bottom:8px;">5-Fold Cross Validation Scores — XGBoost Classifier</div>', unsafe_allow_html=True)
+    cv_folds  = ["Fold 1","Fold 2","Fold 3","Fold 4","Fold 5"]
+    cv_scores = [0.8198,0.8241,0.8187,0.8219,0.8226]
+    fig_cv    = go.Figure(go.Bar(x=cv_folds,y=cv_scores,
+        marker=dict(color=['#005e74','#007a94','#0096b4','#00b4d8','#00cef8'],line=dict(width=0)),
+        text=[f"{v:.4f}" for v in cv_scores],textfont=dict(color='white',size=11),textposition='outside'))
+    fig_cv.add_hline(y=sum(cv_scores)/len(cv_scores),line_dash="dash",line_color="rgba(255,255,255,0.3)",
+                     annotation_text=f"Mean: {sum(cv_scores)/len(cv_scores):.4f}",
+                     annotation_font=dict(color='rgba(255,255,255,0.5)',size=11))
+    fig_cv.update_layout(paper_bgcolor='rgba(0,0,0,0)',plot_bgcolor='rgba(0,0,0,0)',
+        xaxis=dict(tickfont=dict(color='rgba(255,255,255,0.6)',size=11),showgrid=False),
+        yaxis=dict(range=[0.80,0.85],tickfont=dict(color='rgba(255,255,255,0.4)',size=10),gridcolor='rgba(255,255,255,0.05)'),
+        margin=dict(t=30,b=10,l=10,r=10),height=220)
+    st.plotly_chart(fig_cv, use_container_width=True, config={"displayModeBar":False})
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+# ================================================================
+# PAGE 7 — HISTORY
+# ================================================================
+
+def page_history():
+    st.markdown('<div class="page-wrap">', unsafe_allow_html=True)
+    st.markdown('<div class="sec-title">🕐 Prediction & Alert History</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sec-sub">All predictions and alerts from this session with trend charts</div>', unsafe_allow_html=True)
+
+    ph = st.session_state.get("prediction_history", [])
+    ah = st.session_state.get("alert_history", [])
+
+    h1, h2 = st.columns(2)
+
+    with h1:
+        st.markdown('<div class="history-chart-wrap">', unsafe_allow_html=True)
+        st.markdown('<div style="font-size:13px;color:rgba(255,255,255,0.5);margin-bottom:8px;">Rain Probability Trend</div>', unsafe_allow_html=True)
+        if len(ph) >= 2:
+            times  = [p["time"] for p in reversed(ph)]
+            probs  = [p["rain_prob"] for p in reversed(ph)]
+            colors = ["#ff4444" if p>=61 else "#f59e0b" if p>=40 else "#22c55e" for p in probs]
+            fig_trend = go.Figure()
+            fig_trend.add_trace(go.Scatter(x=times, y=probs, mode='lines+markers',
+                line=dict(color='#00b4d8',width=2),
+                marker=dict(color=colors,size=10),
+                fill='tozeroy', fillcolor='rgba(0,180,216,0.07)'))
+            fig_trend.add_hline(y=61,line_dash="dash",line_color="rgba(255,68,68,0.4)",
+                               annotation_text="Threshold 0.61",
+                               annotation_font=dict(color='rgba(255,68,68,0.7)',size=10))
+            fig_trend.update_layout(paper_bgcolor='rgba(0,0,0,0)',plot_bgcolor='rgba(0,0,0,0)',
+                xaxis=dict(tickfont=dict(color='rgba(255,255,255,0.5)',size=10),showgrid=False),
+                yaxis=dict(range=[0,100],tickfont=dict(color='rgba(255,255,255,0.4)',size=10),
+                          gridcolor='rgba(255,255,255,0.05)'),
+                margin=dict(t=10,b=10,l=10,r=10),height=220)
+            st.plotly_chart(fig_trend, use_container_width=True, config={"displayModeBar":False})
+        elif len(ph) == 1:
+            st.markdown('<div style="color:rgba(255,255,255,0.4);font-size:12px;padding:20px 0;">Run at least 2 predictions to see the trend chart.</div>', unsafe_allow_html=True)
+        else:
+            st.markdown('<div style="color:rgba(255,255,255,0.4);font-size:12px;padding:20px 0;">No predictions yet. Go to the Predict page to run the model.</div>', unsafe_allow_html=True)
+
+        st.markdown('<div style="font-size:13px;color:rgba(255,255,255,0.5);margin:1rem 0 8px;">All Prediction Records</div>', unsafe_allow_html=True)
+        if ph:
+            for p in ph:
+                color = "#ff4444" if p["rain_pred"]=="Yes" else "#22c55e"
+                st.markdown(f"""
+                <div class="hist-card">
+                    <span style="color:{color};font-weight:600;">{p['rain_pred']}</span>
+                    &nbsp;|&nbsp; {p['rain_prob']}% rain
+                    &nbsp;|&nbsp; Temp: {p['temp']}°C
+                    &nbsp;|&nbsp; {p['month']}
+                    &nbsp;|&nbsp; Input Temp: {p.get('max_temp','N/A')}°C
+                    &nbsp;|&nbsp; Humidity: {p.get('humidity','N/A')}%
+                    <span style="float:right;color:rgba(255,255,255,0.3);">{p['time']}</span>
+                </div>
+                """, unsafe_allow_html=True)
+        else:
+            st.markdown('<div style="color:rgba(255,255,255,0.4);font-size:12px;">No predictions recorded yet.</div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with h2:
+        st.markdown('<div class="history-chart-wrap">', unsafe_allow_html=True)
+        st.markdown('<div style="font-size:13px;color:rgba(255,255,255,0.5);margin-bottom:8px;">Alert Risk Timeline</div>', unsafe_allow_html=True)
+        if len(ah) >= 2:
+            a_times  = [a["time"] for a in reversed(ah)]
+            a_levels = [{"Low":1,"Medium":2,"High":3}[a["level"]] for a in reversed(ah)]
+            a_colors = [{"Low":"#22c55e","Medium":"#f59e0b","High":"#ff4444"}[a["level"]] for a in reversed(ah)]
+            fig_alt = go.Figure(go.Bar(x=a_times,y=a_levels,
+                marker=dict(color=a_colors,line=dict(width=0)),
+                text=[a["level"] for a in reversed(ah)],
+                textfont=dict(color='white',size=11),textposition='outside'))
+            fig_alt.update_layout(paper_bgcolor='rgba(0,0,0,0)',plot_bgcolor='rgba(0,0,0,0)',
+                xaxis=dict(tickfont=dict(color='rgba(255,255,255,0.5)',size=10),showgrid=False),
+                yaxis=dict(range=[0,4],tickvals=[1,2,3],ticktext=["Low","Medium","High"],
+                          tickfont=dict(color='rgba(255,255,255,0.4)',size=10),showgrid=False),
+                margin=dict(t=10,b=10,l=10,r=10),height=220)
+            st.plotly_chart(fig_alt, use_container_width=True, config={"displayModeBar":False})
+        elif len(ah) == 1:
+            st.markdown('<div style="color:rgba(255,255,255,0.4);font-size:12px;padding:20px 0;">Run at least 2 alert analyses to see the timeline.</div>', unsafe_allow_html=True)
+        else:
+            st.markdown('<div style="color:rgba(255,255,255,0.4);font-size:12px;padding:20px 0;">No alert analyses yet. Go to the Alerts page.</div>', unsafe_allow_html=True)
+
+        st.markdown('<div style="font-size:13px;color:rgba(255,255,255,0.5);margin:1rem 0 8px;">All Alert Records</div>', unsafe_allow_html=True)
+        if ah:
+            for a in ah:
+                lc = {"Low":"#22c55e","Medium":"#f59e0b","High":"#ff4444"}[a["level"]]
+                st.markdown(f"""
+                <div class="hist-card">
+                    <span style="color:{lc};font-weight:600;">{a['level']}</span>
+                    &nbsp;|&nbsp; Rain: {a['rain']}%
+                    &nbsp;|&nbsp; Temp: {a['temp']}°C
+                    &nbsp;|&nbsp; Wind: {a['wind']} km/h
+                    <span style="float:right;color:rgba(255,255,255,0.3);">{a['time']}</span>
+                </div>
+                """, unsafe_allow_html=True)
+        else:
+            st.markdown('<div style="color:rgba(255,255,255,0.4);font-size:12px;">No alert records yet.</div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    # Summary stats
+    if ph or ah:
+        st.markdown('<div style="margin-top:1.5rem;"></div>', unsafe_allow_html=True)
+        total_rain = sum(1 for p in ph if p["rain_pred"]=="Yes")
+        total_high = sum(1 for a in ah if a["level"]=="High")
+        avg_prob   = round(sum(p["rain_prob"] for p in ph)/len(ph),1) if ph else 0
+        s1,s2,s3,s4 = st.columns(4)
+        for col,(icon,val,lbl) in zip([s1,s2,s3,s4],[
+            ("🔮",len(ph),"Total Predictions"),
+            ("🌧️",total_rain,"Rain Predicted"),
+            ("🚨",total_high,"High Risk Alerts"),
+            ("📊",f"{avg_prob}%","Avg Rain Probability")
+        ]):
+            with col: st.markdown(f'<div class="m-card"><div class="m-icon">{icon}</div><div class="m-val">{val}</div><div class="m-lbl">{lbl}</div></div>', unsafe_allow_html=True)
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+# ================================================================
+# MAIN ROUTER
+# ================================================================
+
+def main():
+    load_css()
+    inject_particles()
+    show_navbar()
+
+    page = st.session_state.page
+    if   page == "Home":      page_home()
+    elif page == "Predict":   page_predict()
+    elif page == "Recommend": page_recommend()
+    elif page == "Alerts":    page_alerts()
+    elif page == "Report":    page_report()
+    elif page == "Insights":  page_insights()
+    elif page == "History":   page_history()
+
+    show_footer()
+
+if __name__ == "__main__":
+    main()
