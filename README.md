@@ -1,7 +1,6 @@
 #  WeatherAI — Climate Intelligence System
 
 **AI-Based Weather & Climate Intelligence System for Human Task Optimization**  
-Student: J. Charan Reddy | Reg No: 23BCB7120
 
 ## 🔗 Live Demo
 
